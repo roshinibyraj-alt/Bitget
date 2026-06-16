@@ -13,6 +13,7 @@ const TOP_PAIRS = 10;
 const STATE_FILE = path.join(__dirname, 'state.json');
 const STATE_VERSION = 4;
 const MIN_VOLUME = 100000;
+const MAX_POSITIONS = 5; // max concurrent trades across all TFs
 
 const TIMEFRAMES = [
   { name: '15m', granularity: '15m', scanMs: 900000   },
@@ -144,6 +145,7 @@ function processSignal(symbol, signal, tf, price) {
   const sl = isBuy ? signal.candleLow : signal.candleHigh;
   const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
 
+  if (positions.length >= MAX_POSITIONS) return;
   if (balance < margin) return;
   balance = fl2(balance - margin);
 
@@ -283,6 +285,10 @@ async function scan() {
 
       // Only signal if candle has fully closed
       if (now < candleEndTime) continue;
+
+      // Only accept FRESH signals (candle closed within last 1.5x duration)
+      // This prevents backfilling old signals on startup
+      if (now - candleEndTime > candleDuration * 1.5) continue;
 
       const signal = checkCandleSignal(candles);
       if (!signal) continue;
