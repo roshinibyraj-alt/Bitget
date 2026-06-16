@@ -11,7 +11,7 @@ const LEVERAGE = 20;
 const TAKER_FEE = 0.0006;
 const TOP_PAIRS = 10;
 const STATE_FILE = path.join(__dirname, 'state.json');
-const STATE_VERSION = 5;
+const STATE_VERSION = 6;
 const MIN_VOLUME = 100000;
 
 const TIMEFRAMES = [
@@ -43,11 +43,14 @@ function fl4(v) { return Math.round((v || 0) * 10000) / 10000; }
 // ── API ──
 async function publicGet(path) {
   try {
-    const res = await fetch(API_BASE + path);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(API_BASE + path, { signal: controller.signal });
+    clearTimeout(timeout);
     const data = await res.json();
     if (data.code !== '00000') return null;
     return data.data;
-  } catch (_) { logFn(`⚠️ API error: ${path}`); return null; }
+  } catch (_) { return null; }
 }
 
 async function getAllTickers() {
@@ -258,22 +261,26 @@ async function updatePositions() {
       totalFees = fl4(totalFees + exitFee);
       pnl = fl2(pnl - exitFee);
 
+      // True net PnL = trading PnL - entry fee - exit fee
+      // entry fee was already subtracted from balance at position open
+      const netPnl = fl2(pnl - pos.entryFee);
+
       pos.status = 'closed';
       pos.closeTime = Date.now();
-      pos.pnl = pnl;
+      pos.pnl = netPnl;
       pos.exitReason = reason;
       pos.exitPrice = price;
-      totalRealizedPnl = fl4(totalRealizedPnl + pnl);
+      totalRealizedPnl = fl4(totalRealizedPnl + netPnl);
       lockedMargin = fl2(lockedMargin - pos.margin);
-      balance = fl2(balance + pnl); // only pnl affects balance, margin was never subtracted
+      balance = fl2(balance + pnl); // balance already had entryFee subtracted at entry
 
-      if (pnl >= 0) wins++; else losses++;
+      if (netPnl >= 0) wins++; else losses++;
       trades.push({ ...pos });
       if (trades.length > 200) trades = trades.slice(-200);
       positions.splice(i, 1);
 
       const emoji = reason === 'SL' ? '🔴' : '🟢';
-      logFn(`${emoji} ${reason} ${pos.symbol} (${pos.timeframe}) | Entry:$${pos.entryPrice} SL:$${pos.slPrice} | PnL:$${fl2(pnl)}`);
+      logFn(`${emoji} ${reason} ${pos.symbol} (${pos.timeframe}) | Entry:$${pos.entryPrice} SL:$${pos.slPrice} | PnL:$${fl2(pos.pnl)}`);
       saveState();
       emitFn('snapshot', buildSnapshot());
     }
@@ -293,31 +300,29 @@ async function scan() {
     if (now - (lastScan[tf.name] || 0) < tf.scanMs) continue;
     lastScan[tf.name] = now;
 
-    for (const symbol of activeSymbols) {
+    // Fetch candles in chunks of 5 to avoid overwhelming API
+    const symbols = [...activeSymbols];
+    const results = [];
+    for (let i = 0; i < symbols.length; i += 5) {
+      const chunk = symbols.slice(i, i + 5);
+      const chunkResults = await Promise.all(chunk.map(async (symbol) => {
       const candles = await getCandles(symbol, tf.granularity);
-      if (!Array.isArray(candles) || candles.length < 3) continue;
+      if (!Array.isArray(candles) || candles.length < 3) return null;
 
-      // Check if the previous candle is closed (its end time < now)
       const prev = candles[candles.length - 2];
       const prevEndTs = parseInt(prev[0]);
       const candleDuration = tf.name === '15m' ? 900000 : (tf.name === '1H' ? 3600000 : (tf.name === '4H' ? 14400000 : 86400000));
       const candleEndTime = prevEndTs + candleDuration;
 
-      // Only signal if candle has fully closed
-      if (now < candleEndTime) continue;
-
-      // Only accept FRESH signals (candle must close after bot started)
-      // Prevents opening positions on historical candles from before launch
-      if (candleEndTime < startTime) continue;
-      // Safety: don't process candles that are too old even during runtime
-      if (now - candleEndTime > candleDuration * 1.5) continue;
+      if (now < candleEndTime) return null;
+      if (candleEndTime < startTime) return null;
+      if (now - candleEndTime > candleDuration * 1.5) return null;
 
       const signal = checkCandleSignal(candles);
       
       // Update monitored pair candle data per timeframe
       const pair = monitoredPairs.find(m => m.symbol === symbol);
       if (pair && candles.length >= 2) {
-        const prev = candles[candles.length - 2];
         if (!pair.lastCandle) pair.lastCandle = {};
         pair.lastCandle[tf.name] = {
           open: parseFloat(prev[1]) || 0,
@@ -327,18 +332,20 @@ async function scan() {
         };
       }
       
-      if (!signal) continue;
+      if (!signal) return null;
+      return { symbol, signal, tf, pair };
+    }));
 
-      // Get current price
+      results.push(...chunkResults);
+    }
+    // Process signals
+    for (const r of results) {
+      if (!r) continue;
+      const { symbol, signal, tf, pair } = r;
       const ticker = await getTicker(symbol);
       const price = ticker ? parseFloat(ticker.lastPr || 0) : 0;
       if (!price) continue;
-
-      // Record signal on pair
-      if (pair) {
-        pair.lastSignal = signal.direction;
-      }
-
+      if (pair) pair.lastSignal = signal.direction;
       processSignal(symbol, signal, tf, price);
     }
   }
@@ -440,7 +447,7 @@ async function start(emit, logEmit) {
   loadState();
   logFn(`✅ Candle Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 15m/1H/4H/1D`);
   logFn(`📊 Signal: prev candle color | Entry: next open | SL: candle low/high | TP: 2 candles`);
-  setTimeout(tick, 1000);
+  setTimeout(tick, 5000);
   setInterval(tick, 60000);
   // Fast price update loop for live dashboard (every 5s)
   setInterval(async () => {
