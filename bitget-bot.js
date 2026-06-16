@@ -90,7 +90,17 @@ async function refreshTopPairs() {
   activeSymbols = [...new Set([...gainers.map(t => t.symbol), ...losers.map(t => t.symbol)])];
   lastPairRefresh = Date.now();
 
-  // Init/update monitored pairs
+  // Remove pairs no longer in top 20 AND with no open positions
+  const posSymbols = new Set(positions.filter(p => p.status === 'open').map(p => p.symbol));
+  monitoredPairs = monitoredPairs.filter(p => activeSymbols.includes(p.symbol) || posSymbols.has(p.symbol));
+  // Clean up processedCandles for removed pairs to prevent unbounded growth
+  const activeSet = new Set(activeSymbols);
+  for (const key of Object.keys(processedCandles)) {
+    const sym = key.split(':')[0];
+    if (!activeSet.has(sym) && !posSymbols.has(sym)) delete processedCandles[key];
+  }
+
+  // Init/update monitored pairs for current active symbols
   const pairMap = {};
   withChange.forEach(t => { pairMap[t.symbol] = { price: t.price, change: t.change }; });
   for (const s of activeSymbols) {
