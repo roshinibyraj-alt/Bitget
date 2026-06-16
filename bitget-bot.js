@@ -6,22 +6,32 @@ const path = require('path');
 // ── Config ──
 const API_BASE = 'https://api.bitget.com';
 const DEMO_BALANCE = 10000;
-const CAPITAL_PCT = 0.01;      // 1% per trade
+const CAPITAL_PCT = 0.01;        // 1% per trade
 const LEVERAGE = 20;
-const SL_PCT = 1 / LEVERAGE;   // 5% SL
-const TP_PCT = SL_PCT * 3;     // 15% TP (1:3)
+const SL_PCT = 1 / LEVERAGE;     // 5% SL
+const TP_PCT = SL_PCT * 3;       // 15% TP (1:3)
+const TAKER_FEE = 0.0006;        // 0.06% taker fee
+const TOP_PAIRS = 10;            // top 10 gainers + top 10 losers
 const STATE_FILE = path.join(__dirname, 'state.json');
-const STATE_VERSION = 2;
-const MIN_VOLUME_USD = 1000000;
+const STATE_VERSION = 3;
+const MIN_VOLUME = 100000;
+
+// Timeframes: each is independent
+const TIMEFRAMES = [
+  { name: '15m', granularity: '15m', scanMs: 900000,   label: '15m' },
+  { name: '1H',  granularity: '1H',  scanMs: 3600000,   label: '1H'  },
+  { name: '4H',  granularity: '4H',  scanMs: 14400000,  label: '4H'  },
+];
 
 // ── State ──
 let balance = DEMO_BALANCE;
 let equity = DEMO_BALANCE;
+let totalFees = 0;
 let totalRealizedPnl = 0;
 let wins = 0;
 let losses = 0;
-let trades = [];         // completed trades
-let positions = [];      // open positions
+let trades = [];
+let positions = [];
 let monitoredPairs = [];
 let signalLog = [];
 let emitFn = (e, d) => {};
@@ -31,7 +41,7 @@ let startTime = Date.now();
 function fl2(v) { return Math.round((v || 0) * 100) / 100; }
 function fl4(v) { return Math.round((v || 0) * 10000) / 10000; }
 
-// ── Public Bitget API (only candles + tickers) ──
+// ── Public Bitget API ──
 async function publicGet(path) {
   try {
     const res = await fetch(API_BASE + path);
@@ -41,18 +51,55 @@ async function publicGet(path) {
   } catch (_) { return null; }
 }
 
-async function getAllPairs() {
-  const data = await publicGet('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
-  if (!Array.isArray(data)) return [];
-  return data.filter(c => c.symbol.endsWith('USDT') && parseFloat(c.usdtVolume || c.volume || 0) >= MIN_VOLUME_USD);
+async function getAllTickers() {
+  return await publicGet('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
 }
 
 async function getCandles(symbol, granularity) {
   return await publicGet(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${granularity}&limit=60`);
 }
 
-// ── MACD ──
-function ema(values, period) {
+async function getTicker(symbol) {
+  const d = await publicGet(`/api/v2/mix/market/tickers?productType=USDT-FUTURES&symbol=${symbol}`);
+  return Array.isArray(d) && d.length > 0 ? d[0] : null;
+}
+
+// ── Top gainers & losers ──
+let lastPairRefresh = 0;
+let activeSymbols = [];
+
+async function refreshTopPairs() {
+  if (Date.now() - lastPairRefresh < 300000 && activeSymbols.length > 0) return;
+  const tickers = await getAllTickers();
+  if (!Array.isArray(tickers)) return;
+
+  const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
+  
+  // Calculate 24h % change
+  const withChange = usdt.map(t => {
+    const last = parseFloat(t.lastPr || 0);
+    const open = parseFloat(t.open24h || 0);
+    const chg = open > 0 ? ((last - open) / open) * 100 : 0;
+    return { symbol: t.symbol, change: chg, price: last, volume: parseFloat(t.usdtVolume || 0) };
+  }).filter(t => t.price > 0);
+
+  // Sort by change
+  withChange.sort((a, b) => b.change - a.change);
+
+  const gainers = withChange.slice(0, TOP_PAIRS);
+  const losers = withChange.slice(-TOP_PAIRS).reverse();
+
+  activeSymbols = [...new Set([...gainers.map(t => t.symbol), ...losers.map(t => t.symbol)])];
+  lastPairRefresh = Date.now();
+  logFn(`📋 Top ${TOP_PAIRS} gainers + ${TOP_PAIRS} losers (${activeSymbols.length} pairs)`);
+
+  // Log top/bottom
+  if (gainers.length > 0) logFn(`📈 Top: ${gainers[0].symbol} +${fl2(gainers[0].change)}%`);
+  if (losers.length > 0) logFn(`📉 Bottom: ${losers[0].symbol} ${fl2(losers[0].change)}%`);
+}
+
+// ── EMA ──
+function calcEMA(values, period) {
   const k = 2 / (period + 1);
   let sum = 0;
   for (let i = 0; i < period && i < values.length; i++) sum += values[i];
@@ -74,20 +121,16 @@ function detectMACDCross(prices) {
     macdVals.push(e12 - e26);
   }
   if (macdVals.length < 10) return null;
-
   let sig = 0;
   for (let i = 0; i < 9; i++) sig += macdVals[i];
   sig /= 9;
   for (let i = 9; i < macdVals.length; i++) sig = macdVals[i] * (2/10) + sig * (8/10);
-
   let prevSig = 0;
   for (let i = 0; i < 9; i++) prevSig += macdVals[i];
   prevSig /= 9;
   for (let i = 9; i < macdVals.length - 1; i++) prevSig = macdVals[i] * (2/10) + prevSig * (8/10);
-
   const curM = macdVals[macdVals.length - 1], curS = sig;
   const prevM = macdVals[macdVals.length - 2], prevS = prevSig;
-
   return {
     macd: curM, signal: curS, histogram: curM - curS,
     goldenCross: prevM < prevS && curM > curS,
@@ -95,73 +138,76 @@ function detectMACDCross(prices) {
   };
 }
 
-// ── Check pair ──
-async function checkPair(symbol) {
-  const dCandles = await getCandles(symbol, '1D');
-  if (!Array.isArray(dCandles) || dCandles.length < 36) return null;
-  const dClose = dCandles.map(c => parseFloat(c[4])).filter(p => p > 0);
-  const dMACD = detectMACDCross(dClose);
-  if (!dMACD) return null;
-
-  const h4Candles = await getCandles(symbol, '4H');
-  let h4MACD = null;
-  if (Array.isArray(h4Candles) && h4Candles.length >= 36) {
-    const h4Close = h4Candles.map(c => parseFloat(c[4])).filter(p => p > 0);
-    h4MACD = detectMACDCross(h4Close);
-  }
-
-  const price = parseFloat(dCandles[dCandles.length - 1][4]) || 0;
-
+// ── Check pair on timeframe ──
+async function checkPairTimeframe(symbol, tf) {
+  const candles = await getCandles(symbol, tf.granularity);
+  if (!Array.isArray(candles) || candles.length < 36) return null;
+  const close = candles.map(c => parseFloat(c[4])).filter(p => p > 0);
+  const macd = detectMACDCross(close);
+  if (!macd) return null;
+  const price = parseFloat(candles[candles.length - 1][4]) || 0;
   return {
-    symbol, price, d1: dMACD, h4: h4MACD,
-    dSignal: dMACD.goldenCross ? 'BUY' : (dMACD.deathCross ? 'SELL' : null),
-    h4Signal: h4MACD ? (h4MACD.goldenCross ? 'BUY' : (h4MACD.deathCross ? 'SELL' : null)) : null,
+    symbol, price, macd,
+    signal: macd.goldenCross ? 'BUY' : (macd.deathCross ? 'SELL' : null),
+    timeframe: tf.name,
   };
 }
 
 // ── Simulate Trade ──
-function simulateTrade(signal, timeframe) {
-  const side = signal.dSignal || signal.h4Signal;
+function simulateTrade(signal) {
+  const side = signal.signal;
   if (!side) return;
 
-  if (positions.some(p => p.symbol === signal.symbol)) return;
-  if (trades.some(t => t.symbol === signal.symbol && t.timeframe === timeframe && (Date.now() - (t.closeTime || t.time) < 86400000))) return;
+  // Check for existing position on same symbol + timeframe
+  if (positions.some(p => p.symbol === signal.symbol && p.timeframe === signal.timeframe)) return;
+  // 1 trade per symbol per TF per 24h
+  if (trades.some(t => t.symbol === signal.symbol && t.timeframe === signal.timeframe && (Date.now() - (t.closeTime || t.time) < 86400000))) return;
 
   const isBuy = side === 'BUY';
   const entry = signal.price;
   const sl = isBuy ? fl4(entry * (1 - SL_PCT)) : fl4(entry * (1 + SL_PCT));
   const tp = isBuy ? fl4(entry * (1 + TP_PCT)) : fl4(entry * (1 - TP_PCT));
-  const margin = fl2(DEMO_BALANCE * CAPITAL_PCT); // fixed 1% of base capital
+  const margin = fl2(DEMO_BALANCE * CAPITAL_PCT); // fixed $100
+
+  if (balance < margin) return;
+  balance = fl2(balance - margin);
+  equity = fl2(balance);
+
   const size = fl2(margin * LEVERAGE);
   const contracts = fl2(size / entry);
-  if (contracts <= 0 || margin <= 0) return;
+  if (contracts <= 0) return;
+
+  const entryFee = fl2(size * TAKER_FEE);
+  totalFees = fl4(totalFees + entryFee);
+  balance = fl2(balance - entryFee);
+  equity = fl2(balance);
 
   const btcSide = isBuy ? 'open_long' : 'open_short';
-
-  // balance unchanged on entry, margin reserved virtually
-  equity = fl2(balance);
 
   const pos = {
     id: Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
     symbol: signal.symbol, side: btcSide, direction: side,
     entryPrice: entry, slPrice: sl, tpPrice: tp,
-    size, margin, contracts, timeframe,
-    time: Date.now(), status: 'open',
+    size, margin, contracts, timeframe: signal.timeframe,
+    entryFee, time: Date.now(), status: 'open',
     unrealizedPnl: 0, markPrice: entry,
   };
   positions.push(pos);
 
+  // Update monitored pair
+  const pair = monitoredPairs.find(p => p.symbol === signal.symbol);
+  if (pair) {
+    pair.lastSignal = { side, entryPrice: entry, slPrice: sl, tpPrice: tp, timeframe: signal.timeframe, time: Date.now() };
+  }
+
   signalLog.push({
     symbol: signal.symbol, side: btcSide, entryPrice: entry,
-    timeframe, crossType: side === 'BUY' ? 'golden' : 'death',
+    timeframe: signal.timeframe, crossType: side === 'BUY' ? 'golden' : 'death',
     time: Date.now(),
   });
-  if (signalLog.length > 100) signalLog = signalLog.slice(-100);
+  if (signalLog.length > 200) signalLog = signalLog.slice(-200);
 
-  const pair = monitoredPairs.find(p => p.symbol === signal.symbol);
-  if (pair) pair.lastSignal = { side, entryPrice: entry, slPrice: sl, tpPrice: tp, timeframe, time: Date.now() };
-
-  logFn(`📊 ${side} ${signal.symbol} | Entry: $${entry} | SL: $${sl} | TP: $${tp} | Size: ${contracts}c ($${fl2(size)}) | ${timeframe}`);
+  logFn(`📊 ${side} ${signal.symbol} (${signal.timeframe}) | Entry: $${entry} | SL: $${sl} | TP: $${tp} | Size: ${contracts}c | Fee: $${entryFee}`);
   saveState();
   emitFn('snapshot', buildSnapshot());
 }
@@ -172,54 +218,51 @@ async function updatePrices() {
     const pos = positions[i];
     if (pos.status !== 'open') continue;
 
-    // Fetch current price from ticker
-    const tickers = await publicGet(`/api/v2/mix/market/tickers?productType=USDT-FUTURES&symbol=${pos.symbol}`);
-    let price = pos.entryPrice;
-    if (Array.isArray(tickers) && tickers.length > 0) {
-      price = parseFloat(tickers[0].lastPr || tickers[0].close || 0) || pos.entryPrice;
-    }
-
+    const ticker = await getTicker(pos.symbol);
+    const price = ticker ? (parseFloat(ticker.lastPr || ticker.markPrice || 0) || pos.entryPrice) : pos.entryPrice;
     pos.markPrice = price;
+
     const isLong = pos.direction === 'BUY';
     const diff = isLong ? (price - pos.entryPrice) : (pos.entryPrice - price);
-    pos.unrealizedPnl = fl2((diff / pos.entryPrice) * pos.size);
+    const pnlRaw = (diff / pos.entryPrice) * pos.size;
+    pos.unrealizedPnl = fl2(pnlRaw);
 
-    // Check SL / TP
     let closed = false;
+    let pnl = 0;
+
     if (isLong && price <= pos.slPrice) {
-      // SL hit
-      const loss = pos.margin; // 1R loss (full margin)
-      pos.pnl = -loss;
+      pnl = -pos.margin; // 1R loss
       closed = true;
-      logFn(`🔴 SL ${pos.symbol} | Loss: -$${loss}`);
     } else if (isLong && price >= pos.tpPrice) {
-      // TP hit
-      const profit = fl2(pos.margin * 3); // 3R profit
-      pos.pnl = profit;
+      pnl = fl2(pos.margin * 3); // 3R profit
       closed = true;
-      logFn(`🟢 TP ${pos.symbol} | Profit: +$${profit}`);
     } else if (!isLong && price >= pos.slPrice) {
-      const loss = fl2(pos.margin * 0.95);
-      pos.pnl = -loss;
+      pnl = -pos.margin;
       closed = true;
-      logFn(`🔴 SL ${pos.symbol} | Loss: -$${loss}`);
     } else if (!isLong && price <= pos.tpPrice) {
-      const profit = fl2(pos.margin * 2.85);
-      pos.pnl = profit;
+      pnl = fl2(pos.margin * 3);
       closed = true;
-      logFn(`🟢 TP ${pos.symbol} | Profit: +$${profit}`);
     }
 
     if (closed) {
+      // Exit fee
+      const exitVal = pos.size + (pnl > 0 ? pnl : pnl); // position value at close
+      const exitFee = fl2(pos.size * TAKER_FEE);
+      totalFees = fl4(totalFees + exitFee);
+      pnl = fl2(pnl - exitFee);
+
       pos.status = 'closed';
       pos.closeTime = Date.now();
-      totalRealizedPnl = fl4(totalRealizedPnl + pos.pnl);
-      balance = fl2(balance + pos.margin + pos.pnl);
+      pos.pnl = pnl;
+      totalRealizedPnl = fl4(totalRealizedPnl + pnl);
+      balance = fl2(balance + pos.margin + pnl);
       equity = fl2(balance);
-      if (pos.pnl >= 0) wins++; else losses++;
+
+      if (pnl >= 0) wins++; else losses++;
       trades.push({ ...pos });
-      if (trades.length > 100) trades = trades.slice(-100);
+      if (trades.length > 200) trades = trades.slice(-200);
       positions.splice(i, 1);
+      logFn(`${pnl >= 0 ? '🟢 TP' : '🔴 SL'} ${pos.symbol} (${pos.timeframe}) | PnL: ${fl2(pnl >= 0 ? pnl : -pnl)} | Fee: $${exitFee}`);
       saveState();
       emitFn('snapshot', buildSnapshot());
     }
@@ -227,53 +270,53 @@ async function updatePrices() {
 }
 
 // ── Scan ──
-let last1dScan = 0, last4hScan = 0;
+let lastScan = {};
 
 async function scan() {
+  await refreshTopPairs();
+  if (activeSymbols.length === 0) return;
+
   const now = Date.now();
-  if (now - last1dScan < 3600000 && now - last4hScan < 14400000) return;
-  const s1d = now - last1dScan >= 3600000;
-  const s4h = now - last4hScan >= 14400000;
+  let scanned = 0;
 
-  logFn(`🔍 Scanning... ${s1d ? '1D ' : ''}${s4h ? '4H' : ''}`);
-  const pairs = await getAllPairs();
-  if (pairs.length === 0) return;
+  for (const tf of TIMEFRAMES) {
+    const key = tf.name;
+    if (now - (lastScan[key] || 0) < tf.scanMs) continue;
+    lastScan[key] = now;
 
-  for (const p of pairs) {
-    if (!monitoredPairs.some(m => m.symbol === p.symbol)) {
-      monitoredPairs.push({ symbol: p.symbol, price: 0, macd1d: null, macd4h: null, lastSignal: null, lastCheck: 0 });
+    for (const symbol of activeSymbols) {
+      // Update monitored pair
+      if (!monitoredPairs.some(m => m.symbol === symbol)) {
+        monitoredPairs.push({ symbol, price: 0, macd: {}, lastSignal: null, lastCheck: 0 });
+      }
+
+      const pair = monitoredPairs.find(m => m.symbol === symbol);
+      if (now - (pair.lastCheck || 0) < 30000) continue;
+      pair.lastCheck = now;
+
+      const signal = await checkPairTimeframe(symbol, tf);
+      if (!signal) continue;
+      pair.price = signal.price;
+      if (!pair.macd) pair.macd = {};
+      pair.macd[tf.name] = signal.macd;
+      scanned++;
+
+      if (signal.signal) {
+        simulateTrade(signal);
+      }
     }
   }
-  if (monitoredPairs.length > 200) monitoredPairs = monitoredPairs.slice(-200);
 
-  let scanned = 0;
-  const batch = monitoredPairs.slice(0, 30); // max 30 pairs per scan
-  for (const pair of batch) {
-    if (now - pair.lastCheck < 60000) continue;
-    pair.lastCheck = now;
-    const signal = await checkPair(pair.symbol);
-    if (!signal) continue;
-    pair.price = signal.price;
-    pair.macd1d = signal.d1;
-    if (signal.h4) pair.macd4h = signal.h4;
-    scanned++;
-
-    if (s1d && signal.dSignal) simulateTrade(signal, '1D');
-    if (s4h && signal.h4Signal) simulateTrade(signal, '4H');
-  }
-
-  if (s1d) last1dScan = now;
-  if (s4h) last4hScan = now;
-  logFn(`✅ Scanned ${scanned}/${monitoredPairs.length} pairs | Bal: $${fl2(balance)}`);
+  if (scanned > 0) logFn(`✅ ${scanned} signals checked | Bal: $${fl2(balance)} | Pos: ${positions.length}`);
 }
 
 // ── State ──
 function saveState() {
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify({
-      stateVersion: STATE_VERSION, balance, totalRealizedPnl, wins, losses,
-      trades: trades.slice(-100), positions: positions.filter(p => p.status === 'open'),
-      signalLog: signalLog.slice(-100),
+      stateVersion: STATE_VERSION, balance, totalRealizedPnl, totalFees, wins, losses,
+      trades: trades.slice(-200), positions: positions.filter(p => p.status === 'open'),
+      signalLog: signalLog.slice(-200),
     }, null, 2));
   } catch (_) {}
 }
@@ -285,13 +328,12 @@ function loadState() {
       if (d.stateVersion === STATE_VERSION) {
         balance = d.balance || DEMO_BALANCE;
         totalRealizedPnl = d.totalRealizedPnl || 0;
+        totalFees = d.totalFees || 0;
         wins = d.wins || 0; losses = d.losses || 0;
         trades = d.trades || [];
         positions = (d.positions || []).filter(p => p.status === 'open');
         signalLog = d.signalLog || [];
-      } else {
-        balance = DEMO_BALANCE;
-      }
+      } else { balance = DEMO_BALANCE; }
     }
   } catch (_) {}
 }
@@ -305,6 +347,7 @@ function buildSnapshot() {
     totalPnl: fl4(totalRealizedPnl + openUpl),
     realizedPnl: fl4(totalRealizedPnl),
     unrealizedPnl: fl4(openUpl),
+    totalFees: fl4(totalFees),
     wins, losses,
     totalTrades: wins + losses,
     winRate: wins + losses > 0 ? fl4((wins / (wins + losses)) * 100) : 0,
@@ -313,24 +356,18 @@ function buildSnapshot() {
       entryPrice: p.entryPrice, slPrice: p.slPrice, tpPrice: p.tpPrice,
       size: p.size, margin: p.margin, contracts: p.contracts,
       timeframe: p.timeframe, unrealizedPnl: p.unrealizedPnl || 0,
-      markPrice: p.markPrice || 0,
+      markPrice: p.markPrice || 0, entryFee: p.entryFee || 0,
     })),
     pairs: monitoredPairs.map(p => ({
       symbol: p.symbol, price: p.price,
-      macd1d: p.macd1d ? {
-        macd: fl4(p.macd1d.macd), signal: fl4(p.macd1d.signal),
-        histogram: fl4(p.macd1d.histogram),
-        goldenCross: !!p.macd1d.goldenCross, deathCross: !!p.macd1d.deathCross,
-      } : null,
-      macd4h: p.macd4h ? {
-        macd: fl4(p.macd4h.macd), signal: fl4(p.macd4h.signal),
-        histogram: fl4(p.macd4h.histogram),
-        goldenCross: !!p.macd4h.goldenCross, deathCross: !!p.macd4h.deathCross,
-      } : null,
+      macd15m: p.macd?.['15m'] || null,
+      macd1H: p.macd?.['1H'] || null,
+      macd4H: p.macd?.['4H'] || null,
       lastSignal: p.lastSignal,
     })),
-    signals: signalLog.slice(-30).reverse(),
-    trades: trades.slice(-30).reverse(),
+    signals: signalLog.slice(-40).reverse(),
+    trades: trades.slice(-40).reverse(),
+    timeframes: TIMEFRAMES.map(t => t.name),
     demo: true,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     activePairs: positions.filter(p => p.status === 'open').length,
@@ -352,11 +389,8 @@ async function tick() {
 async function start(emit, logEmit) {
   emitFn = emit; logFn = logEmit; startTime = Date.now();
   loadState();
-
-  logFn(`✅ MACD Bot v${STATE_VERSION} | DEMO $${fl2(balance)}`);
-  logFn(`📊 1% margin | 20x leverage | 1:3 R:R | Internal simulation`);
-
-  // First scan deferred to avoid blocking server
+  logFn(`✅ MACD Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 15m/1H/4H`);
+  logFn(`📊 1% margin | 20x leverage | 1:3 R:R | Top gainers+losers | Fees 0.06%`);
   setTimeout(tick, 1000);
   setInterval(tick, 60000);
   emitFn('snapshot', buildSnapshot());

@@ -38,6 +38,7 @@ tr:hover td{background:var(--bg3)}
 .badge-sell{background:rgba(255,23,68,0.12);color:var(--red)}
 .badge-open{background:rgba(68,138,255,0.12);color:var(--blue)}
 .badge-1d{background:rgba(124,77,255,0.12);color:var(--purple)}
+.badge-15m{background:rgba(0,200,83,0.12);color:var(--green)}
 .badge-4h{background:rgba(0,229,255,0.12);color:var(--cyan)}
 .badge-cross{background:rgba(255,214,0,0.12);color:var(--gold);animation:pulse 1.5s infinite}
 @keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
@@ -71,6 +72,7 @@ tr:hover td{background:var(--bg3)}
       <div class="stat"><div class="sl">Win</div><div class="sv g" id="hd-win">0</div></div>
       <div class="stat"><div class="sl">Loss</div><div class="sv r" id="hd-loss">0</div></div>
       <div class="stat"><div class="sl">Win%</div><div class="sv gold" id="hd-wr">0%</div></div>
+      <div class="stat"><div class="sl">Fees</div><div class="sv r" id="hd-fees">$0</div></div>
       <div class="stat"><div class="sl">Active</div><div class="sv" id="hd-act">0</div></div>
     </div>
   </div>
@@ -90,7 +92,7 @@ tr:hover td{background:var(--bg3)}
   
   <!-- Monitored Pairs (1D MACD) -->
   <div class="card">
-    <div class="card-title">📈 Monitored Pairs — 1D MACD <span id="pair-count-1d">(0)</span></div>
+    <div class="card-title">📈 Top Gainers/Losers — MACD <span id="pair-count-1d">(0)</span></div>
     <div class="card-body" id="pair-list-1d"><div class="empty">Scanning pairs...</div></div>
   </div>
   
@@ -133,6 +135,8 @@ function render(d){
   document.getElementById('hd-win').textContent=d.wins||0;
   document.getElementById('hd-loss').textContent=d.losses||0;
   document.getElementById('hd-wr').textContent=(d.winRate||0)+'%';
+  document.getElementById('hd-fees').textContent='$'+fmtP(d.totalFees||0);
+  document.getElementById('hd-fees').className='sv '+(d.totalFees<=0?'r':'g');
   document.getElementById('hd-act').textContent=d.activePairs||0;
   
   var modeEl=document.getElementById('hd-mode');
@@ -147,7 +151,7 @@ function render(d){
   if(!pos.length){
     pl.innerHTML='<div class="empty">No open positions</div>';
   }else{
-    var h='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Mark</th><th>Size</th><th>Contracts</th><th>PnL</th><th>TF</th><th>SL</th><th>TP</th></tr>';
+    var h='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Mark</th><th>Size</th><th>Contracts</th><th>PnL</th><th>TF</th><th>Fees</th><th>SL</th><th>TP</th></tr>';
     pos.forEach(function(p){
       var sideCls=p.direction==='BUY'?'badge-buy':'badge-sell';
       var sideTxt=p.direction==='BUY'?'LONG':'SHORT';
@@ -199,21 +203,25 @@ function render(d){
   if(!pairs.length){
     p1l.innerHTML='<div class="empty">Scanning pairs...</div>';
   }else{
-    var p1h='<table><tr><th>Pair</th><th>Price</th><th>MACD</th><th>Signal</th><th>Hist</th><th>Cross</th></tr>';
+    var p1h='<table><tr><th>Pair</th><th>Price</th><th>15m</th><th>1H</th><th>4H</th><th>Signal</th></tr>';
     pairs.forEach(function(p){
-      var m=p.macd1d;
-      var crossHtml='';
-      if(m.goldenCross) crossHtml='<span class="badge badge-cross">🟢 GOLDEN</span>';
-      else if(m.deathCross) crossHtml='<span class="badge badge-cross">🔴 DEATH</span>';
-      else crossHtml='<span style="color:var(--muted)">—</span>';
+      function tfCell(tfData, tfName){
+        if(!tfData) return '<td style="color:var(--muted);font-size:9px">—</td>';
+        var cross='';
+        if(tfData.goldenCross) cross='<span style="color:var(--green)">▲</span>';
+        else if(tfData.deathCross) cross='<span style="color:var(--red)">▼</span>';
+        return '<td style="font-size:9px">'+cross+' <span style="color:'+cls(tfData.histogram)+'">'+fmt4(tfData.histogram)+'</span></td>';
+      }
+      var sigHtml='<span style="color:var(--muted);font-size:9px">—</span>';
+      if(p.lastSignal) sigHtml='<span class="badge '+(p.lastSignal.side==='BUY'?'badge-buy':'badge-sell')+'">'+(p.lastSignal.side==='BUY'?'LONG':'SHORT')+'</span><span style="color:var(--muted);font-size:8px"> '+p.lastSignal.timeframe+'</span>';
       
       p1h+='<tr>'+
         '<td><strong>'+p.symbol+'</strong></td>'+
         '<td>$'+fmt(p.price)+'</td>'+
-        '<td style="color:'+cls(m.macd)+'">'+fmt4(m.macd)+'</td>'+
-        '<td style="color:'+cls(m.signal)+'">'+fmt4(m.signal)+'</td>'+
-        '<td><div class="macd-bar">'+macdBar(m.histogram)+'<span class="macd-val" style="color:'+cls(m.histogram)+'">'+fmt4(m.histogram)+'</span></div></td>'+
-        '<td>'+crossHtml+'</td>'+
+        tfCell(p.macd15m,'15m')+
+        tfCell(p.macd1H,'1H')+
+        tfCell(p.macd4H,'4H')+
+        '<td>'+sigHtml+'</td>'+
       '</tr>';
     });
     p1h+='</table>';
