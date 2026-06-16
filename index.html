@@ -121,6 +121,7 @@ function macdBar(val){
   return '<div class="macd-line" style="width:'+w+'%;background:'+c+'"></div>';
 }
 
+function getTfClass(tf){if(tf==='1D')return 'badge-1d';if(tf==='4H')return 'badge-4h';if(tf==='1H')return 'badge-4h';return 'badge-15m';}
 function render(d){
   lastData=d;
   var dot=document.getElementById('hd-dot');
