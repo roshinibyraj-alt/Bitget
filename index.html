@@ -136,9 +136,9 @@ function render(d){
   document.getElementById('hd-act').textContent=d.activePairs||0;
   
   var modeEl=document.getElementById('hd-mode');
-  if(d.canTrade) modeEl.innerHTML='<span class="mode-tag mode-live">🔴 LIVE</span>';
-  else if(d.dryRun) modeEl.innerHTML='<span class="mode-tag mode-dry">🟡 DRY RUN</span>';
-  else modeEl.innerHTML='<span class="mode-tag mode-demo">🔵 SIGNAL ONLY</span>';
+  if(d.demo) modeEl.innerHTML='<span class="mode-tag mode-demo">🟢 DEMO $10k</span>';
+  
+  
   
   // Positions
   var pos=d.positions||[];
@@ -147,17 +147,17 @@ function render(d){
   if(!pos.length){
     pl.innerHTML='<div class="empty">No open positions</div>';
   }else{
-    var h='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Mark</th><th>Size</th><th>PnL</th><th>TF</th><th>SL</th><th>TP</th></tr>';
+    var h='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Mark</th><th>Size</th><th>Contracts</th><th>PnL</th><th>TF</th><th>SL</th><th>TP</th></tr>';
     pos.forEach(function(p){
-      var sideCls=p.side.indexOf('long')>=0?'badge-buy':'badge-sell';
-      var sideTxt=p.side.indexOf('long')>=0?'LONG':'SHORT';
+      var sideCls=p.direction==='BUY'?'badge-buy':'badge-sell';
+      var sideTxt=p.direction==='BUY'?'LONG':'SHORT';
       var uPnl=p.unrealizedPnl||0;
       h+='<tr>'+
         '<td><strong>'+p.symbol+'</strong></td>'+
         '<td><span class="badge '+sideCls+'">'+sideTxt+'</span></td>'+
         '<td>$'+fmt(p.entryPrice)+'</td>'+
         '<td>$'+fmt(p.markPrice||p.entryPrice)+'</td>'+
-        '<td>$'+fmt(p.size)+'</td>'+
+        '<td>$'+fmt(p.size)+'</td><td>'+fmtS(p.contracts)+'c</td>'+
         '<td style="color:'+(uPnl>=0?'var(--green)':'var(--red)')+'">$'+fmtP(uPnl)+'</td>'+
         '<td><span class="badge '+(p.timeframe==='1D'?'badge-1d':'badge-4h')+'">'+p.timeframe+'</span></td>'+
         '<td>$'+fmt(p.slPrice)+'</td>'+
@@ -177,7 +177,7 @@ function render(d){
   }else{
     var sh='';
     sigs.forEach(function(s){
-      var sideCls=s.side.indexOf('long')>=0?'badge-buy':'badge-sell';
+      var sideCls=s.side.indexOf('long')>=0||s.side==='BUY'?'badge-buy':'badge-sell';
       var crossType=s.crossType==='golden'?'🟢 GOLDEN CROSS':'🔴 DEATH CROSS';
       var tf=s.timeframe||'1D';
       sh+='<div class="signal-item">'+
@@ -227,7 +227,7 @@ function render(d){
   if(!trades.length){
     tl.innerHTML='<div class="empty">No trades yet</div>';
   }else{
-    var th='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Size</th><th>PnL</th><th>TF</th><th>Time</th></tr>';
+    var th='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Size</th><th>Contracts</th><th>PnL</th><th>TF</th><th>Time</th></tr>';
     trades.forEach(function(t){
       var sCls=t.side.indexOf('long')>=0?'badge-buy':'badge-sell';
       var sTxt=t.side.indexOf('long')>=0?'LONG':'SHORT';
