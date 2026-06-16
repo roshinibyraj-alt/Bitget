@@ -561,16 +561,18 @@ async function runBacktest(options = {}) {
         btTrades.push({ symbol, direction: signal.direction, entry, exitPrice, pnl: netPnl, exitReason, time: entryCandle[0] });
       }
       
-      const tfResult = results.timeframe[tfKey];
-      if (tfResult.trades > 0) {
-        const o = results.overall;
-        o.trades += tfResult.trades;
-        o.wins += tfResult.wins;
-        o.losses += tfResult.losses;
-        o.pnl = fl4(o.pnl + tfResult.pnl);
-        o.fees = fl4(o.fees + tfResult.fees);
-      }
     }
+  }
+  
+  // Aggregate overall results after all symbols processed
+  const o = results.overall;
+  for (const tfKey of Object.keys(results.timeframe)) {
+    const tf = results.timeframe[tfKey];
+    o.trades += tf.trades;
+    o.wins += tf.wins;
+    o.losses += tf.losses;
+    o.pnl = fl4(o.pnl + tf.pnl);
+    o.fees = fl4(o.fees + tf.fees);
   }
   
   results.overall.winRate = results.overall.trades > 0 
