@@ -292,8 +292,10 @@ async function scan() {
       // Only signal if candle has fully closed
       if (now < candleEndTime) continue;
 
-      // Only accept FRESH signals (candle closed within last 1.5x duration)
-      // This prevents backfilling old signals on startup
+      // Only accept FRESH signals (candle must close after bot started)
+      // Prevents opening positions on historical candles from before launch
+      if (candleEndTime < startTime) continue;
+      // Safety: don't process candles that are too old even during runtime
       if (now - candleEndTime > candleDuration * 1.5) continue;
 
       const signal = checkCandleSignal(candles);
