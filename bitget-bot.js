@@ -212,13 +212,13 @@ async function updatePositions() {
     let pnl = 0;
     let reason = '';
 
-    // Check SL
+    // Check SL — loss = actual price move × position size
     if (isLong && price <= pos.slPrice) {
-      pnl = -pos.margin;
+      pnl = fl2(((pos.slPrice - pos.entryPrice) / pos.entryPrice) * pos.size);
       reason = 'SL';
       closed = true;
     } else if (!isLong && price >= pos.slPrice) {
-      pnl = -pos.margin;
+      pnl = fl2(((pos.entryPrice - pos.slPrice) / pos.entryPrice) * pos.size);
       reason = 'SL';
       closed = true;
     }
