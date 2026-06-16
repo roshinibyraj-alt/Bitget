@@ -315,7 +315,6 @@ async function scan() {
       const candleEndTime = prevEndTs + candleDuration;
 
       if (now < candleEndTime) return null;
-      if (candleEndTime < startTime) return null;
       if (now - candleEndTime > candleDuration * 1.5) return null;
 
       const signal = checkCandleSignal(candles);
