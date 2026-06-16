@@ -61,7 +61,7 @@ let tickerCache = [];
 let tickerCacheTime = 0;
 
 async function getTicker(symbol) {
-  if (Date.now() - tickerCacheTime > 15000) {
+  if (Date.now() - tickerCacheTime > 5000) {
     const d = await publicGet('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
     tickerCache = Array.isArray(d) ? d : [];
     tickerCacheTime = Date.now();
@@ -393,6 +393,13 @@ async function start(emit, logEmit) {
   logFn(`📊 Signal: prev candle color | Entry: next open | SL: candle low/high | TP: 2 candles`);
   setTimeout(tick, 1000);
   setInterval(tick, 60000);
+  // Fast price update loop for live dashboard (every 5s)
+  setInterval(async () => {
+    try {
+      await updatePositions();
+      emitFn('snapshot', buildSnapshot());
+    } catch(e) {}
+  }, 5000);
   emitFn('snapshot', buildSnapshot());
 }
 
