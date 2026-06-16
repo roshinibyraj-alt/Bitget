@@ -197,7 +197,7 @@ function render(d){
   }
   
   // Monitored Pairs 1D
-  var pairs=(d.pairs||[]).filter(function(p){return p.macd1d;});
+  var pairs=(d.pairs||[]).filter(function(p){return p.macd15m||p.macd1H||p.macd4H;});
   document.getElementById('pair-count-1d').textContent='('+pairs.length+')';
   var p1l=document.getElementById('pair-list-1d');
   if(!pairs.length){
