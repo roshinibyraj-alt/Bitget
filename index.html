@@ -58,8 +58,9 @@ tr:hover td{background:var(--bg3)}
     <div class="logo"><span class="dot" id="hd-dot">●</span>Bitget Candle Bot</div>
     <div style="font-size:9px;color:var(--muted)" id="hd-mode"></div>
     <div class="stats">
-      <div class="stat"><div class="sl">Balance</div><div class="sv" id="hd-bal">$0</div></div>
-      <div class="stat"><div class="sl">Equity</div><div class="sv" id="hd-eq">$0</div></div>
+      <div class="stat"><div class="sl">Capital</div><div class="sv" id="hd-bal">$0</div></div>
+      <div class="stat"><div class="sl">Available</div><div class="sv" id="hd-avl">$0</div></div>
+      <div class="stat"><div class="sl">Locked</div><div class="sv" id="hd-lck" style="color:var(--muted)">$0</div></div>
       <div class="stat"><div class="sl">P&L</div><div class="sv" id="hd-pnl">$0</div></div>
       <div class="stat"><div class="sl">Win</div><div class="sv g" id="hd-win">0</div></div>
       <div class="stat"><div class="sl">Loss</div><div class="sv r" id="hd-loss">0</div></div>
@@ -110,7 +111,8 @@ function render(d){
   
   document.getElementById('hd-mode').innerHTML='<span class="mode-tag mode-demo">DEMO '+d.pairs.length+'p</span>';
   document.getElementById('hd-bal').textContent='$'+fmt(d.balance);
-  document.getElementById('hd-eq').textContent='$'+fmt(d.equity);
+  document.getElementById('hd-avl').textContent='$'+fmt(d.available||d.balance);
+  document.getElementById('hd-lck').textContent='$'+fmt(d.locked||0);
   var pnlEl=document.getElementById('hd-pnl');
   pnlEl.textContent='$'+fmtP(d.totalPnl);
   pnlEl.style.color=(d.totalPnl||0)>=0?'var(--green)':'var(--red)';

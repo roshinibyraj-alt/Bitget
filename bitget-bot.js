@@ -23,6 +23,7 @@ const TIMEFRAMES = [
 
 // ── State ──
 let balance = DEMO_BALANCE;
+let lockedMargin = 0; // margin locked in open positions
 let totalFees = 0;
 let totalRealizedPnl = 0;
 let wins = 0;
@@ -161,8 +162,9 @@ function processSignal(symbol, signal, tf, price) {
   const sl = isBuy ? signal.candleLow : signal.candleHigh;
   const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
 
-  if (balance < margin) return;
-  balance = fl2(balance - margin);
+  // Check available = total equity - locked margin (including unrealized PnL)
+  const currentOpenUpl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+  if (balance + currentOpenUpl - lockedMargin < margin) return;
 
   const size = fl2(margin * LEVERAGE);
   const contracts = fl2(size / entry);
@@ -192,6 +194,7 @@ function processSignal(symbol, signal, tf, price) {
     entryFee, time: Date.now(), tpTime,
     status: 'open', unrealizedPnl: 0, markPrice: entry,
   };
+  lockedMargin = fl2(lockedMargin + margin);
   positions.push(pos);
 
   const pair = monitoredPairs.find(p => p.symbol === symbol);
@@ -261,7 +264,8 @@ async function updatePositions() {
       pos.exitReason = reason;
       pos.exitPrice = price;
       totalRealizedPnl = fl4(totalRealizedPnl + pnl);
-      balance = fl2(balance + pos.margin + pnl);
+      lockedMargin = fl2(lockedMargin - pos.margin);
+      balance = fl2(balance + pnl); // only pnl affects balance, margin was never subtracted
 
       if (pnl >= 0) wins++; else losses++;
       trades.push({ ...pos });
@@ -344,7 +348,7 @@ async function scan() {
 function saveState() {
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify({
-      stateVersion: STATE_VERSION, balance, totalRealizedPnl, totalFees, wins, losses,
+      stateVersion: STATE_VERSION, balance, lockedMargin, totalRealizedPnl, totalFees, wins, losses,
       trades: trades.slice(-200), positions: positions.filter(p => p.status === 'open'),
       signalLog: signalLog.slice(-200), processedCandles,
     }, null, 2));
@@ -357,6 +361,7 @@ function loadState() {
       const d = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
       if (d.stateVersion === STATE_VERSION) {
         balance = d.balance || DEMO_BALANCE;
+        lockedMargin = d.lockedMargin || 0;
         totalRealizedPnl = d.totalRealizedPnl || 0;
         totalFees = d.totalFees || 0;
         wins = d.wins || 0; losses = d.losses || 0;
@@ -372,9 +377,13 @@ function loadState() {
 // ── Snapshot ──
 function buildSnapshot() {
   const openUpl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
+  const totalMargin = positions.reduce((s, p) => s + (p.margin || 0), 0);
+  const totalEquity = fl2(balance + openUpl); // balance already has fees subtracted
+  const availableBalance = fl2(totalEquity - totalMargin);
   return {
-    balance: fl2(balance),
-    equity: fl2(balance + openUpl),
+    balance: totalEquity,
+    available: availableBalance,
+    locked: fl2(totalMargin),
     totalPnl: fl4(totalRealizedPnl + openUpl),
     realizedPnl: fl4(totalRealizedPnl),
     unrealizedPnl: fl4(openUpl),
