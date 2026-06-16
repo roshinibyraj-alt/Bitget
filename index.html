@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>Bitget MACD Bot</title>
+<title>Bitget Candle Bot</title>
 <script src="/socket.io/socket.io.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -39,31 +39,23 @@ tr:hover td{background:var(--bg3)}
 .badge-open{background:rgba(68,138,255,0.12);color:var(--blue)}
 .badge-1d{background:rgba(124,77,255,0.12);color:var(--purple)}
 .badge-15m{background:rgba(0,200,83,0.12);color:var(--green)}
-.badge-4h{background:rgba(0,229,255,0.12);color:var(--cyan)}
-.badge-cross{background:rgba(255,214,0,0.12);color:var(--gold);animation:pulse 1.5s infinite}
-@keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
-.pair-row{display:flex;align-items:center;gap:6px;padding:5px 4px;border-bottom:1px solid var(--bg4);font-size:11px}
-.pair-row:last-child{border-bottom:none}
-.pair-name{font-weight:700;min-width:70px}
-.pair-price{color:var(--muted);min-width:60px}
-.macd-bar{display:flex;align-items:center;gap:4px;flex:1}
-.macd-val{font-size:9px;min-width:55px;text-align:right}
-.macd-line{height:4px;border-radius:2px;flex:1;min-width:40px}
-.progress-container{width:100%;height:4px;background:var(--bg4);border-radius:2px;margin-top:6px}
-.progress-fill{height:100%;border-radius:2px;transition:width 0.5s}
-.signal-item{padding:6px 8px;border-bottom:1px solid var(--bg4);font-size:10px;display:flex;align-items:center;gap:6px}
-.signal-item:last-child{border-bottom:none}
+.badge-1h{background:rgba(0,229,255,0.12);color:var(--cyan)}
+.badge-4h{background:rgba(255,214,0,0.12);color:var(--gold)}
 .empty{text-align:center;padding:20px;color:var(--muted);font-size:12px}
 .mode-tag{font-size:8px;padding:3px 8px;border-radius:4px;font-weight:700}
 .mode-live{background:rgba(0,200,83,0.15);color:var(--green)}
 .mode-dry{background:rgba(255,214,0,0.15);color:var(--gold)}
 .mode-demo{background:rgba(68,138,255,0.15);color:var(--blue)}
+.sig-cell{font-size:9px;text-align:center;padding:2px 4px}
+.candle-green{color:var(--green)}
+.candle-red{color:var(--red)}
+.wr{white-space:nowrap}
 </style>
 </head>
 <body>
 <header>
   <div class="top-row">
-    <div class="logo"><span class="dot" id="hd-dot">●</span>Bitget MACD Bot</div>
+    <div class="logo"><span class="dot" id="hd-dot">●</span>Bitget Candle Bot</div>
     <div style="font-size:9px;color:var(--muted)" id="hd-mode"></div>
     <div class="stats">
       <div class="stat"><div class="sl">Balance</div><div class="sv" id="hd-bal">$0</div></div>
@@ -72,91 +64,75 @@ tr:hover td{background:var(--bg3)}
       <div class="stat"><div class="sl">Win</div><div class="sv g" id="hd-win">0</div></div>
       <div class="stat"><div class="sl">Loss</div><div class="sv r" id="hd-loss">0</div></div>
       <div class="stat"><div class="sl">Win%</div><div class="sv gold" id="hd-wr">0%</div></div>
-      <div class="stat"><div class="sl">Fees</div><div class="sv r" id="hd-fees">$0</div></div>
-      <div class="stat"><div class="sl">Active</div><div class="sv" id="hd-act">0</div></div>
+      <div class="stat"><div class="sl">Fees</div><div class="sv" id="hd-fees" style="color:var(--muted)">$0</div></div>
     </div>
   </div>
 </header>
 <div class="grid">
-  <!-- Active Positions -->
+  <!-- Positions Card -->
   <div class="card">
-    <div class="card-title">📊 Active Positions <span id="pos-count">(0)</span></div>
-    <div class="card-body" id="pos-list"><div class="empty">No open positions</div></div>
+    <div class="card-title">Active Positions <span id="pos-count">(0)</span></div>
+    <div class="card-body" id="pos-list"><div class="empty">No active positions</div></div>
   </div>
-  
-  <!-- Signal History -->
+
+  <!-- Trade History Card -->
   <div class="card">
-    <div class="card-title">⚡ Recent Signals <span id="sig-count">(0)</span></div>
-    <div class="card-body" id="sig-list"><div class="empty">No signals yet</div></div>
-  </div>
-  
-  <!-- Monitored Pairs (1D MACD) -->
-  <div class="card">
-    <div class="card-title">📈 Top Gainers/Losers — MACD <span id="pair-count-1d">(0)</span></div>
-    <div class="card-body" id="pair-list-1d"><div class="empty">Scanning pairs...</div></div>
-  </div>
-  
-  <!-- Trade History -->
-  <div class="card">
-    <div class="card-title">📜 Trade History <span id="trade-count">(0)</span></div>
+    <div class="card-title">Trade History <span id="trade-count">(0)</span></div>
     <div class="card-body" id="trade-list"><div class="empty">No trades yet</div></div>
+  </div>
+
+  <!-- Pairs Card -->
+  <div class="card">
+    <div class="card-title">Top 20 Pairs <span id="pair-count">(0)</span></div>
+    <div class="card-body" id="pair-list"><div class="empty">Scanning pairs...</div></div>
+  </div>
+
+  <!-- Signal Log Card -->
+  <div class="card">
+    <div class="card-title">Signal Log <span id="sig-count">(0)</span></div>
+    <div class="card-body" id="sig-list"><div class="empty">No signals yet</div></div>
   </div>
 </div>
 
 <script>
 (function(){
-var s=io({transports:["websocket","polling"],upgrade:false,reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000});
-var lastData=null;
+var s=io();
+function fmt(v){return typeof v==='number'?v.toFixed(v<0.01?6:v<1?4:2):v||0}
+function fmtS(v){return typeof v==='number'?(v>1000?(v/1000).toFixed(1)+'k':v.toFixed(v<1?4:0)):v||0}
+function fmtP(v){return (v>=0?'+':'')+v.toFixed(2)}
+function cls(v){return (v||0)>=0?'var(--green)':'var(--red)'}
 
-function fmt(v){return typeof v==='number'?v.toFixed(2):'0.00';}
-function fmt4(v){return typeof v==='number'?v.toFixed(4):'0.0000';}
-function fmtP(v){return (v>=0?'+':'')+Math.abs(v).toFixed(2);}
-function fmtS(v){return typeof v==='number'?v.toFixed(0):'0';}
-
-function cls(v){return v>=0?'g':'r';}
-
-function macdBar(val){
-  var w=Math.min(100,Math.max(0,(val/0.0005)*100));
-  var c=val>=0?'var(--green)':'var(--red)';
-  return '<div class="macd-line" style="width:'+w+'%;background:'+c+'"></div>';
-}
-
-function getTfClass(tf){if(tf==='1D')return 'badge-1d';if(tf==='4H')return 'badge-4h';if(tf==='1H')return 'badge-4h';return 'badge-15m';}
 function render(d){
-  lastData=d;
+  if(!d)return;
+  // Header dot
   var dot=document.getElementById('hd-dot');
-  var act=d.activePairs>0;
-  dot.className='dot '+(act?'on':(d.canTrade?'idle':'idle'));
+  if(d.positions&&d.positions.length>0){dot.className='dot on'}else{dot.className='dot idle'}
   
+  document.getElementById('hd-mode').innerHTML='<span class="mode-tag mode-demo">DEMO '+d.pairs.length+'p</span>';
   document.getElementById('hd-bal').textContent='$'+fmt(d.balance);
   document.getElementById('hd-eq').textContent='$'+fmt(d.equity);
-  var pnl=d.totalPnl||0;
-  document.getElementById('hd-pnl').textContent='$'+fmtP(pnl);
-  document.getElementById('hd-pnl').className='sv '+cls(pnl);
+  var pnlEl=document.getElementById('hd-pnl');
+  pnlEl.textContent='$'+fmtP(d.totalPnl);
+  pnlEl.style.color=(d.totalPnl||0)>=0?'var(--green)':'var(--red)';
   document.getElementById('hd-win').textContent=d.wins||0;
   document.getElementById('hd-loss').textContent=d.losses||0;
   document.getElementById('hd-wr').textContent=(d.winRate||0)+'%';
-  document.getElementById('hd-fees').textContent='$'+fmtP(d.totalFees||0);
-  document.getElementById('hd-fees').className='sv '+(d.totalFees<=0?'r':'g');
-  document.getElementById('hd-act').textContent=d.activePairs||0;
-  
-  var modeEl=document.getElementById('hd-mode');
-  if(d.demo) modeEl.innerHTML='<span class="mode-tag mode-demo">🟢 DEMO $10k</span>';
-  
-  
+  document.getElementById('hd-fees').textContent='$'+fmt(d.totalFees);
   
   // Positions
   var pos=d.positions||[];
   document.getElementById('pos-count').textContent='('+pos.length+')';
   var pl=document.getElementById('pos-list');
   if(!pos.length){
-    pl.innerHTML='<div class="empty">No open positions</div>';
+    pl.innerHTML='<div class="empty">No active positions</div>';
   }else{
-    var h='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Mark</th><th>Size</th><th>Contracts</th><th>PnL</th><th>TF</th><th>Fees</th><th>SL</th><th>TP</th></tr>';
+    var h='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Mark</th><th>Size</th><th>Contracts</th><th>Unreal PnL</th><th>TF</th><th>SL</th><th>Remaining</th></tr>';
     pos.forEach(function(p){
       var sideCls=p.direction==='BUY'?'badge-buy':'badge-sell';
       var sideTxt=p.direction==='BUY'?'LONG':'SHORT';
       var uPnl=p.unrealizedPnl||0;
+      var tfCls=p.timeframe==='1D'?'badge-1d':(p.timeframe==='4H'?'badge-4h':(p.timeframe==='1H'?'badge-1h':'badge-15m'));
+      var remaining=p.tpTime?Math.max(0,Math.floor((p.tpTime-Date.now())/60000))+'m':'—';
       h+='<tr>'+
         '<td><strong>'+p.symbol+'</strong></td>'+
         '<td><span class="badge '+sideCls+'">'+sideTxt+'</span></td>'+
@@ -164,9 +140,9 @@ function render(d){
         '<td>$'+fmt(p.markPrice||p.entryPrice)+'</td>'+
         '<td>$'+fmt(p.size)+'</td><td>'+fmtS(p.contracts)+'c</td>'+
         '<td style="color:'+(uPnl>=0?'var(--green)':'var(--red)')+'">$'+fmtP(uPnl)+'</td>'+
-        '<td><span class="badge '+(p.timeframe==='1D'?'badge-1d':'badge-4h')+'">'+p.timeframe+'</span></td>'+
+        '<td><span class="badge '+tfCls+'">'+p.timeframe+'</span></td>'+
         '<td>$'+fmt(p.slPrice)+'</td>'+
-        '<td>$'+fmt(p.tpPrice)+'</td>'+
+        '<td style="color:var(--muted);font-size:9px">'+remaining+'</td>'+
       '</tr>';
     });
     h+='</table>';
@@ -182,51 +158,59 @@ function render(d){
   }else{
     var sh='';
     sigs.forEach(function(s){
-      var sideCls=s.side.indexOf('long')>=0||s.side==='BUY'?'badge-buy':'badge-sell';
-      var crossType=s.crossType==='golden'?'🟢 GOLDEN CROSS':'🔴 DEATH CROSS';
-      var tf=s.timeframe||'1D';
+      var sideCls=s.direction==='BUY'?'badge-buy':'badge-sell';
+      var tf=s.timeframe||'—';
+      var tfCls=tf==='1D'?'badge-1d':(tf==='4H'?'badge-4h':(tf==='1H'?'badge-1h':'badge-15m'));
+      var candleDir=s.side && s.side.indexOf('long')>=0 ? '🟢' : '🔴';
+      var candleLabel=s.candleOpen && s.candleClose 
+        ? (s.candleClose > s.candleOpen ? '🟢 GREEN' : '🔴 RED')
+        : '';
       sh+='<div class="signal-item">'+
-        '<span class="badge '+(tf==='1D'?'badge-1d':'badge-4h')+'">'+tf+'</span>'+
-        '<span class="badge '+sideCls+'">'+(s.side.indexOf('long')>=0?'LONG':'SHORT')+'</span>'+
+        '<span class="badge '+tfCls+'">'+tf+'</span>'+
+        '<span class="badge '+sideCls+'">'+(s.direction==='BUY'?'LONG':'SHORT')+'</span>'+
         '<strong>'+s.symbol+'</strong>'+
-        '<span style="font-size:8px">@ $'+fmt(s.entryPrice)+'</span>'+
-        '<span style="color:var(--gold);margin-left:auto;font-size:9px">'+crossType+'</span>'+
-        '<span style="color:var(--muted);font-size:8px">'+(s.time?new Date(s.time).toLocaleTimeString():'')+'</span>'+
+        '<span style="font-size:8px;color:var(--muted)">@ $'+fmt(s.entryPrice)+'</span>'+
+        '<span style="font-size:8px;color:var(--muted)">| C: $'+fmt(s.candleOpen)+'→$'+fmt(s.candleClose)+' '+candleLabel+'</span>'+
+        '<span style="color:var(--muted);font-size:8px;margin-left:auto">'+new Date(s.time).toLocaleTimeString()+'</span>'+
       '</div>';
     });
     sl.innerHTML=sh;
   }
   
-  // Monitored Pairs 1D
-  var pairs=(d.pairs||[]).filter(function(p){return p.macd15m||p.macd1H||p.macd4H;});
-  document.getElementById('pair-count-1d').textContent='('+pairs.length+')';
-  var p1l=document.getElementById('pair-list-1d');
+  // Pairs
+  var pairs=d.pairs||[];
+  document.getElementById('pair-count').textContent='('+pairs.length+')';
+  var pl2=document.getElementById('pair-list');
   if(!pairs.length){
-    p1l.innerHTML='<div class="empty">Scanning pairs...</div>';
+    pl2.innerHTML='<div class="empty">Scanning pairs...</div>';
   }else{
-    var p1h='<table><tr><th>Pair</th><th>Price</th><th>15m</th><th>1H</th><th>4H</th><th>Signal</th></tr>';
+    var tfs=['15m','1H','4H','1D'];
+    var p2h='<table><tr><th>Pair</th><th>Price</th><th>24h Chg</th><th>15m</th><th>1H</th><th>4H</th><th>1D</th><th>Signal</th></tr>';
     pairs.forEach(function(p){
-      function tfCell(tfData, tfName){
-        if(!tfData) return '<td style="color:var(--muted);font-size:9px">—</td>';
-        var cross='';
-        if(tfData.goldenCross) cross='<span style="color:var(--green)">▲</span>';
-        else if(tfData.deathCross) cross='<span style="color:var(--red)">▼</span>';
-        return '<td style="font-size:9px">'+cross+' <span style="color:'+cls(tfData.histogram)+'">'+fmt4(tfData.histogram)+'</span></td>';
-      }
       var sigHtml='<span style="color:var(--muted);font-size:9px">—</span>';
-      if(p.lastSignal) sigHtml='<span class="badge '+(p.lastSignal.side==='BUY'?'badge-buy':'badge-sell')+'">'+(p.lastSignal.side==='BUY'?'LONG':'SHORT')+'</span><span style="color:var(--muted);font-size:8px"> '+p.lastSignal.timeframe+'</span>';
-      
-      p1h+='<tr>'+
+      if(p.lastSignal){
+        sigHtml='<span class="badge '+(p.lastSignal==='BUY'?'badge-buy':'badge-sell')+'">'+(p.lastSignal==='BUY'?'LONG':'SHORT')+'</span>';
+      }
+      function candleCell(pair,tf){
+        var lc=pair.lastCandle||{};
+        var tfLc=lc[tf]||{};
+        if(!tfLc.close) return '<td style="color:var(--muted);font-size:9px;text-align:center">—</td>';
+        var icon=tfLc.close>tfLc.open?'<span class="candle-green">🟢</span>':'<span class="candle-red">🔴</span>';
+        return '<td style="font-size:10px;text-align:center" class="wr">'+icon+'</td>';
+      }
+      p2h+='<tr>'+
         '<td><strong>'+p.symbol+'</strong></td>'+
         '<td>$'+fmt(p.price)+'</td>'+
-        tfCell(p.macd15m,'15m')+
-        tfCell(p.macd1H,'1H')+
-        tfCell(p.macd4H,'4H')+
+        '<td style="color:'+cls(p.change)+'">'+(p.change? (p.change>0?'+':'')+p.change.toFixed(2)+'%':'—')+'</td>'+
+        candleCell(p,'15m')+
+        candleCell(p,'1H')+
+        candleCell(p,'4H')+
+        candleCell(p,'1D')+
         '<td>'+sigHtml+'</td>'+
       '</tr>';
     });
-    p1h+='</table>';
-    p1l.innerHTML=p1h;
+    p2h+='</table>';
+    pl2.innerHTML=p2h;
   }
   
   // Trades
@@ -236,19 +220,23 @@ function render(d){
   if(!trades.length){
     tl.innerHTML='<div class="empty">No trades yet</div>';
   }else{
-    var th='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Size</th><th>Contracts</th><th>PnL</th><th>TF</th><th>Time</th></tr>';
+    var th='<table><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Exit</th><th>Contracts</th><th>PnL</th><th>TF</th><th>Reason</th><th>Time</th></tr>';
     trades.forEach(function(t){
-      var sCls=t.side.indexOf('long')>=0?'badge-buy':'badge-sell';
-      var sTxt=t.side.indexOf('long')>=0?'LONG':'SHORT';
+      var sCls=t.direction==='BUY'?'badge-buy':'badge-sell';
+      var sTxt=t.direction==='BUY'?'LONG':'SHORT';
       var tPnl=t.pnl||0;
+      var tfCls=t.timeframe==='1D'?'badge-1d':(t.timeframe==='4H'?'badge-4h':(t.timeframe==='1H'?'badge-1h':'badge-15m'));
+      var reasonBadge=t.exitReason==='SL'?'🔴 SL':'🟢 TP';
       th+='<tr>'+
         '<td><strong>'+t.symbol+'</strong></td>'+
         '<td><span class="badge '+sCls+'">'+sTxt+'</span></td>'+
         '<td>$'+fmt(t.entryPrice)+'</td>'+
-        '<td>$'+fmt(t.size)+'</td>'+
+        '<td>$'+fmt(t.exitPrice||0)+'</td>'+
+        '<td>'+fmtS(t.contracts)+'c</td>'+
         '<td style="color:'+(tPnl>=0?'var(--green)':'var(--red)')+'">$'+fmtP(tPnl)+'</td>'+
-        '<td><span class="badge '+(t.timeframe==='1D'?'badge-1d':'badge-4h')+'">'+(t.timeframe||'—')+'</span></td>'+
-        '<td style="color:var(--muted);font-size:9px">'+(t.closeTime?new Date(t.closeTime).toLocaleDateString()+' '+new Date(t.closeTime).toLocaleTimeString():'')+'</td>'+
+        '<td><span class="badge '+tfCls+'">'+(t.timeframe||'—')+'</span></td>'+
+        '<td style="font-size:9px">'+reasonBadge+'</td>'+
+        '<td style="color:var(--muted);font-size:8px">'+new Date(t.closeTime||t.time).toLocaleDateString()+' '+new Date(t.closeTime||t.time).toLocaleTimeString()+'</td>'+
       '</tr>';
     });
     th+='</table>';

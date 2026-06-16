@@ -5,13 +5,13 @@ const path = require('path');
 
 // ── Config ──
 const API_BASE = 'https://api.bitget.com';
-const DEMO_BALANCE = 10000;
+const DEMO_BALANCE = 30000;
 const CAPITAL_PCT = 0.01;
 const LEVERAGE = 20;
 const TAKER_FEE = 0.0006;
 const TOP_PAIRS = 10;
 const STATE_FILE = path.join(__dirname, 'state.json');
-const STATE_VERSION = 4;
+const STATE_VERSION = 5;
 const MIN_VOLUME = 100000;
 
 const TIMEFRAMES = [
@@ -46,7 +46,7 @@ async function publicGet(path) {
     const data = await res.json();
     if (data.code !== '00000') return null;
     return data.data;
-  } catch (_) { return null; }
+  } catch (_) { logFn(`⚠️ API error: ${path}`); return null; }
 }
 
 async function getAllTickers() {
@@ -90,10 +90,17 @@ async function refreshTopPairs() {
   activeSymbols = [...new Set([...gainers.map(t => t.symbol), ...losers.map(t => t.symbol)])];
   lastPairRefresh = Date.now();
 
-  // Init monitored pairs
+  // Init/update monitored pairs
+  const pairMap = {};
+  withChange.forEach(t => { pairMap[t.symbol] = { price: t.price, change: t.change }; });
   for (const s of activeSymbols) {
-    if (!monitoredPairs.find(m => m.symbol === s)) {
-      monitoredPairs.push({ symbol: s, price: 0, lastSignal: null, lastCandle: {} });
+    const existing = monitoredPairs.find(m => m.symbol === s);
+    const td = pairMap[s] || {};
+    if (existing) {
+      existing.price = td.price || existing.price;
+      existing.change = td.change;
+    } else {
+      monitoredPairs.push({ symbol: s, price: td.price || 0, change: td.change || 0, lastSignal: null, lastCandle: {} });
     }
   }
   logFn(`📋 ${activeSymbols.length} pairs (${gainers[0]?.symbol}+${fl2(gainers[0]?.change)}% / ${losers[0]?.symbol}${fl2(losers[0]?.change)}%)`);
@@ -179,8 +186,9 @@ function processSignal(symbol, signal, tf, price) {
 
   const pair = monitoredPairs.find(p => p.symbol === symbol);
   if (pair) {
-    pair.lastSignal = { side: signal.direction, entryPrice: entry, slPrice: sl, timeframe: tf.name, time: Date.now() };
-    pair.lastCandle[tf.name] = { direction: signal.direction, open: signal.candleOpen, close: signal.candleClose, high: signal.candleHigh, low: signal.candleLow };
+    pair.lastSignal = signal.direction;
+    if (!pair.lastCandle) pair.lastCandle = {};
+    pair.lastCandle[tf.name] = { open: signal.candleOpen, high: signal.candleHigh, low: signal.candleLow, close: signal.candleClose };
   }
 
   signalLog.push({
@@ -289,12 +297,31 @@ async function scan() {
       if (now - candleEndTime > candleDuration * 1.5) continue;
 
       const signal = checkCandleSignal(candles);
+      
+      // Update monitored pair candle data per timeframe
+      const pair = monitoredPairs.find(m => m.symbol === symbol);
+      if (pair && candles.length >= 2) {
+        const prev = candles[candles.length - 2];
+        if (!pair.lastCandle) pair.lastCandle = {};
+        pair.lastCandle[tf.name] = {
+          open: parseFloat(prev[1]) || 0,
+          high: parseFloat(prev[2]) || 0,
+          low: parseFloat(prev[3]) || 0,
+          close: parseFloat(prev[4]) || 0,
+        };
+      }
+      
       if (!signal) continue;
 
       // Get current price
       const ticker = await getTicker(symbol);
       const price = ticker ? parseFloat(ticker.lastPr || 0) : 0;
       if (!price) continue;
+
+      // Record signal on pair
+      if (pair) {
+        pair.lastSignal = signal.direction;
+      }
 
       processSignal(symbol, signal, tf, price);
     }
@@ -353,6 +380,7 @@ function buildSnapshot() {
       tpTime: p.tpTime,
     })),
     pairs: monitoredPairs.map(p => ({
+      change: p.change || 0,
       symbol: p.symbol, price: p.price,
       lastCandle: p.lastCandle || {},
       lastSignal: p.lastSignal,
@@ -396,6 +424,11 @@ async function start(emit, logEmit) {
   // Fast price update loop for live dashboard (every 5s)
   setInterval(async () => {
     try {
+      // Update pair prices from ticker cache
+      for (const p of monitoredPairs) {
+        const t = tickerCache.find(tc => tc.symbol === p.symbol);
+        if (t) p.price = parseFloat(t.lastPr || t.markPrice || 0) || p.price;
+      }
       await updatePositions();
       emitFn('snapshot', buildSnapshot());
     } catch(e) {}
