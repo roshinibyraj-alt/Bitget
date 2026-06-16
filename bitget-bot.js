@@ -463,4 +463,121 @@ async function start(emit, logEmit) {
   emitFn('snapshot', buildSnapshot());
 }
 
-module.exports = { start, buildSnapshot };
+
+
+// ── Backtest ──
+async function fetchAllCandles(symbol, granularity) {
+  // Bitget API returns up to 200 candles (most recent data)
+  // 15m: ~2 days, 1H: ~8 days, 4H: ~33 days, 1D: ~90 days
+  const data = await publicGet(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${granularity}&limit=200`);
+  return Array.isArray(data) ? data : [];
+}
+
+async function runBacktest(options = {}) {
+  const { daysBack = 30, topPairs = 5 } = options;
+  const results = { timeframe: {}, overall: { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0, winRate: 0 } };
+  
+  // Get top gainers/losers
+  const tickers = await getAllTickers();
+  if (!Array.isArray(tickers)) return { error: 'Failed to fetch tickers' };
+  const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
+  const withChange = usdt.map(t => {
+    const last = parseFloat(t.lastPr || 0);
+    const open = parseFloat(t.open24h || 0);
+    return { symbol: t.symbol, change: open > 0 ? ((last - open) / open) * 100 : 0, price: last };
+  }).filter(t => t.price > 0);
+  withChange.sort((a, b) => b.change - a.change);
+  const symbols = [
+    ...withChange.slice(0, topPairs).map(t => t.symbol),
+    ...withChange.slice(-topPairs).reverse().map(t => t.symbol)
+  ];
+  const uniqueSymbols = [...new Set(symbols)];
+  
+  for (const symbol of uniqueSymbols) {
+    for (const tf of TIMEFRAMES) {
+      const tfKey = tf.name;
+      if (!results.timeframe[tfKey]) results.timeframe[tfKey] = { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0 };
+      
+      const candles = await fetchAllCandles(symbol, tf.granularity, daysBack);
+      if (candles.length < 3) continue;
+      
+      // Run strategy: iterate through candles, check signal on each closed candle
+      let btBalance = DEMO_BALANCE;
+      let btPositions = [];
+      let btTrades = [];
+      
+      for (let i = 2; i < candles.length; i++) {
+        // Get slice of last 3 candles up to index i
+        const slice = candles.slice(0, i + 1);
+        const signal = checkCandleSignal(slice);
+        if (!signal) continue;
+        
+        const isBuy = signal.direction === 'BUY';
+        const entryCandle = candles[i]; // candle after signal
+        if (!entryCandle) continue;
+        const entry = parseFloat(entryCandle[1]); // open of next candle
+        if (!entry) continue;
+        
+        const sl = isBuy ? signal.candleLow : signal.candleHigh;
+        const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
+        if (btBalance < margin) continue;
+        
+        const size = fl2(margin * LEVERAGE);
+        const entryFee = fl2(size * TAKER_FEE);
+        btBalance = fl2(btBalance - entryFee);
+        
+        // Find exit: scan forward 2 candle durations for SL hit or time exit
+        const candleMs = tf.name === '15m' ? 900000 : (tf.name === '1H' ? 3600000 : (tf.name === '4H' ? 14400000 : 86400000));
+        const exitIdx = Math.min(i + 2, candles.length - 1); // exit after 2 candles
+        let exitPrice = null;
+        let exitReason = 'TP_TIME';
+        
+        // Check SL in the next 2 candles
+        for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
+          const c = candles[j];
+          const cLow = parseFloat(c[3]);
+          const cHigh = parseFloat(c[2]);
+          if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+          if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+        }
+        
+        if (!exitPrice) {
+          exitPrice = parseFloat(candles[exitIdx][4]); // close of exit candle
+        }
+        
+        const diff = isBuy ? (exitPrice - entry) : (entry - exitPrice);
+        const tradingPnl = (diff / entry) * size;
+        const exitFee = fl2(size * TAKER_FEE);
+        const netPnl = fl2(tradingPnl - exitFee - entryFee);
+        
+        btBalance = fl2(btBalance + tradingPnl - exitFee);
+        
+        const tfResult = results.timeframe[tfKey];
+        tfResult.trades++;
+        tfResult.pnl = fl4(tfResult.pnl + netPnl);
+        tfResult.fees = fl4(tfResult.fees + entryFee + exitFee);
+        if (netPnl >= 0) tfResult.wins++; else tfResult.losses++;
+        
+        btTrades.push({ symbol, direction: signal.direction, entry, exitPrice, pnl: netPnl, exitReason, time: entryCandle[0] });
+      }
+      
+      const tfResult = results.timeframe[tfKey];
+      if (tfResult.trades > 0) {
+        const o = results.overall;
+        o.trades += tfResult.trades;
+        o.wins += tfResult.wins;
+        o.losses += tfResult.losses;
+        o.pnl = fl4(o.pnl + tfResult.pnl);
+        o.fees = fl4(o.fees + tfResult.fees);
+      }
+    }
+  }
+  
+  results.overall.winRate = results.overall.trades > 0 
+    ? fl4((results.overall.wins / results.overall.trades) * 100) : 0;
+  results.overall.roi = fl4((results.overall.pnl / DEMO_BALANCE) * 100);
+  
+  return results;
+}
+
+module.exports = { start, buildSnapshot, runBacktest };

@@ -57,6 +57,8 @@ tr:hover td{background:var(--bg3)}
   <div class="top-row">
     <div class="logo"><span class="dot" id="hd-dot">●</span>Bitget Candle Bot</div>
     <div style="font-size:9px;color:var(--muted)" id="hd-mode"></div>
+    <button onclick="runBacktest()" style="margin-left:auto;background:var(--bg4);color:var(--white);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:10px;cursor:pointer">📊 Backtest 1 Month</button>
+    <span id="bt-status" style="font-size:9px;color:var(--muted)"></span>
     <div class="stats">
       <div class="stat"><div class="sl">Capital</div><div class="sv" id="hd-bal">$0</div></div>
       <div class="stat"><div class="sl">Available</div><div class="sv" id="hd-avl">$0</div></div>
@@ -92,6 +94,11 @@ tr:hover td{background:var(--bg3)}
   <div class="card">
     <div class="card-title">Signal Log <span id="sig-count">(0)</span></div>
     <div class="card-body" id="sig-list"><div class="empty">No signals yet</div></div>
+  </div>
+  <!-- Backtest Results Card -->
+  <div class="card">
+    <div class="card-title">Backtest Results <span id="bt-count"></span></div>
+    <div class="card-body" id="bt-list"><div class="empty">Click "Backtest 1 Month" to run</div></div>
   </div>
 </div>
 
@@ -250,6 +257,56 @@ s.on('snapshot',function(d){if(d)render(d);});
 setInterval(function(){
   fetch('/api/snapshot').then(function(r){return r.json();}).then(function(d){if(d)render(d);}).catch(function(){});
 }, 3000);
+
+function runBacktest(){
+  var btn=document.querySelector('button');
+  var st=document.getElementById('bt-status');
+  btn.disabled=true; st.textContent='Running...';
+  fetch('/api/backtest?pairs=5').then(function(r){return r.json();}).then(function(d){
+    st.textContent=d.message||'Error';
+    setTimeout(checkBacktestResult, 1000);
+  }).catch(function(){st.textContent='Failed';btn.disabled=false;});
+}
+
+function checkBacktestResult(){
+  fetch('/api/backtest/result').then(function(r){return r.json();}).then(function(d){
+    if(!d||d.status==='not_run'){setTimeout(checkBacktestResult,2000);return;}
+    renderBacktest(d);
+    document.querySelector('button').disabled=false;
+    document.getElementById('bt-status').textContent='Done';
+  }).catch(function(){setTimeout(checkBacktestResult,2000);});
+}
+
+function renderBacktest(d){
+  var el=document.getElementById('bt-list');
+  document.getElementById('bt-count').textContent='('+d.overall.trades+' trades)';
+  var h='<table style="font-size:10px"><tr><th>Metric</th><th>Overall</th><th>15m</th><th>1H</th><th>4H</th><th>1D</th></tr>';
+  var tfs=d.timeframe||{};
+  function cell(tf,key){var v=tf?tf[key]:0;return typeof v==='number'?fmt(v):v;}
+  h+='<tr><td><strong>Trades</strong></td><td>'+d.overall.trades+'</td>'+
+    '<td>'+(tfs['15m']?tfs['15m'].trades:0)+'</td>'+
+    '<td>'+(tfs['1H']?tfs['1H'].trades:0)+'</td>'+
+    '<td>'+(tfs['4H']?tfs['4H'].trades:0)+'</td>'+
+    '<td>'+(tfs['1D']?tfs['1D'].trades:0)+'</td></tr>';
+  h+='<tr><td><strong>Win Rate</strong></td><td>'+d.overall.winRate+'%</td>'+
+    '<td>'+(tfs['15m']?((tfs['15m'].wins/(tfs['15m'].trades||1)*100).toFixed(1)):0)+'%</td>'+
+    '<td>'+(tfs['1H']?((tfs['1H'].wins/(tfs['1H'].trades||1)*100).toFixed(1)):0)+'%</td>'+
+    '<td>'+(tfs['4H']?((tfs['4H'].wins/(tfs['4H'].trades||1)*100).toFixed(1)):0)+'%</td>'+
+    '<td>'+(tfs['1D']?((tfs['1D'].wins/(tfs['1D'].trades||1)*100).toFixed(1)):0)+'%</td></tr>';
+  h+='<tr><td><strong>PnL</strong></td><td style="color:'+cls(d.overall.pnl)+'">$'+fmtP(d.overall.pnl)+'</td>'+
+    '<td style="color:'+cls((tfs['15m']||{}).pnl)+'">$'+fmtP((tfs['15m']||{}).pnl||0)+'</td>'+
+    '<td style="color:'+cls((tfs['1H']||{}).pnl)+'">$'+fmtP((tfs['1H']||{}).pnl||0)+'</td>'+
+    '<td style="color:'+cls((tfs['4H']||{}).pnl)+'">$'+fmtP((tfs['4H']||{}).pnl||0)+'</td>'+
+    '<td style="color:'+cls((tfs['1D']||{}).pnl)+'">$'+fmtP((tfs['1D']||{}).pnl||0)+'</td></tr>';
+  h+='<tr><td><strong>Fees</strong></td><td>$'+fmt(d.overall.fees)+'</td>'+
+    '<td>$'+fmt((tfs['15m']||{}).fees||0)+'</td>'+
+    '<td>$'+fmt((tfs['1H']||{}).fees||0)+'</td>'+
+    '<td>$'+fmt((tfs['4H']||{}).fees||0)+'</td>'+
+    '<td>$'+fmt((tfs['1D']||{}).fees||0)+'</td></tr>';
+  h+='<tr><td><strong>ROI</strong></td><td>'+d.overall.roi+'%</td><td colspan="4"></td></tr>';
+  h+='</table>';
+  el.innerHTML=h;
+}
 })();
 </script>
 </body>
