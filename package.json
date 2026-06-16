@@ -1,0 +1,14 @@
+{
+  "name": "bitget-macd-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bitget MACD Golden/Death Cross Bot — 1D & 4H",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "socket.io": "^4.7.0"
+  }
+}
