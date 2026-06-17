@@ -11,19 +11,16 @@ const LEVERAGE = 20;
 const TAKER_FEE = 0.0006;
 const TOP_PAIRS = 10;
 const STATE_FILE = path.join(__dirname, 'state.json');
-const STATE_VERSION = 6;
+const STATE_VERSION = 7;
 const MIN_VOLUME = 100000;
 
 const TIMEFRAMES = [
-  { name: '15m', granularity: '15m', scanMs: 900000   },
-  { name: '1H',  granularity: '1H',  scanMs: 3600000   },
-  { name: '4H',  granularity: '4H',  scanMs: 14400000  },
-  { name: '1D',  granularity: '1D',  scanMs: 86400000  },
+  { name: '1D', granularity: '1D', scanMs: 86400000 },
 ];
 
 // ── State ──
 let balance = DEMO_BALANCE;
-let lockedMargin = 0; // margin locked in open positions
+let lockedMargin = 0;
 let totalFees = 0;
 let totalRealizedPnl = 0;
 let wins = 0;
@@ -32,7 +29,7 @@ let trades = [];
 let positions = [];
 let monitoredPairs = [];
 let signalLog = [];
-let processedCandles = {}; // key: symbol:tf:ts -> true
+let processedCandles = {};
 let emitFn = (e, d) => {};
 let logFn = (m) => {};
 let startTime = Date.now();
@@ -57,8 +54,8 @@ async function getAllTickers() {
   return await publicGet('/api/v2/mix/market/tickers?productType=USDT-FUTURES');
 }
 
-async function getCandles(symbol, granularity) {
-  return await publicGet(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${granularity}&limit=10`);
+async function getCandles(symbol, granularity, limit) {
+  return await publicGet(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${granularity}&limit=${limit || 10}`);
 }
 
 let tickerCache = [];
@@ -73,12 +70,27 @@ async function getTicker(symbol) {
   return tickerCache.find(t => t.symbol === symbol) || null;
 }
 
-// ── Pair Selection ──
+// ── Pair Selection (daily refresh at 23:50 UTC) ──
 let lastPairRefresh = 0;
 let activeSymbols = [];
 
+function getMsUntilNextRefresh() {
+  const now = new Date();
+  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 50, 0, 0));
+  if (now >= utc) utc.setUTCDate(utc.getUTCDate() + 1);
+  return utc - now;
+}
+
 async function refreshTopPairs() {
-  if (Date.now() - lastPairRefresh < 300000 && activeSymbols.length > 0) return;
+  // Only refresh at 23:50 UTC daily (or forced on first run)
+  const now = new Date();
+  const utcH = now.getUTCHours(), utcM = now.getUTCMinutes();
+  const isRefreshTime = utcH === 23 && utcM >= 48 && utcM <= 55;
+  const isFirstRun = lastPairRefresh === 0;
+
+  if (!isFirstRun && !isRefreshTime && activeSymbols.length > 0) return;
+  if (isFirstRun && activeSymbols.length > 0 && !isRefreshTime) return; // already have pairs
+
   const tickers = await getAllTickers();
   if (!Array.isArray(tickers)) return;
   const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
@@ -94,17 +106,16 @@ async function refreshTopPairs() {
   activeSymbols = [...new Set([...gainers.map(t => t.symbol), ...losers.map(t => t.symbol)])];
   lastPairRefresh = Date.now();
 
-  // Remove pairs no longer in top 20 AND with no open positions
+  // Keep pairs with open positions
   const posSymbols = new Set(positions.filter(p => p.status === 'open').map(p => p.symbol));
   monitoredPairs = monitoredPairs.filter(p => activeSymbols.includes(p.symbol) || posSymbols.has(p.symbol));
-  // Clean up processedCandles for removed pairs to prevent unbounded growth
+
   const activeSet = new Set(activeSymbols);
   for (const key of Object.keys(processedCandles)) {
     const sym = key.split(':')[0];
     if (!activeSet.has(sym) && !posSymbols.has(sym)) delete processedCandles[key];
   }
 
-  // Init/update monitored pairs for current active symbols
   const pairMap = {};
   withChange.forEach(t => { pairMap[t.symbol] = { price: t.price, change: t.change }; });
   for (const s of activeSymbols) {
@@ -117,44 +128,32 @@ async function refreshTopPairs() {
       monitoredPairs.push({ symbol: s, price: td.price || 0, change: td.change || 0, lastSignal: null, lastCandle: {} });
     }
   }
-  logFn(`📋 ${activeSymbols.length} pairs (${gainers[0]?.symbol}+${fl2(gainers[0]?.change)}% / ${losers[0]?.symbol}${fl2(losers[0]?.change)}%)`);
+
+  logFn(`📋 ${activeSymbols.length} pairs (${gainers[0]?.symbol || '?'} +${fl2(gainers[0]?.change)}% / ${losers[0]?.symbol || '?'} ${fl2(losers[0]?.change)}%)`);
 }
 
 // ── Candle Color Signal ──
 function checkCandleSignal(candles) {
   if (!Array.isArray(candles) || candles.length < 3) return null;
-
-  // candles[0] = oldest, candles[last] = newest (still forming)
-  // candles[last-1] = previous completed candle
-  const prev = candles[candles.length - 2]; // previous closed candle
-  const prev2 = candles[candles.length - 3]; // candle before that (for reference)
-
+  const prev = candles[candles.length - 2];
   if (!prev) return null;
-
   const open = parseFloat(prev[1]);
   const close = parseFloat(prev[4]);
   const high = parseFloat(prev[2]);
   const low = parseFloat(prev[3]);
-  const ts = prev[0]; // candle timestamp
-
+  const ts = prev[0];
   if (!open || !close) return null;
-
   const isGreen = close > open;
   const isRed = close < open;
-  if (!isGreen && !isRed) return null; // doji, skip
-
+  if (!isGreen && !isRed) return null;
   return {
     direction: isGreen ? 'BUY' : 'SELL',
     signalTime: parseInt(ts),
-    candleOpen: open,
-    candleClose: close,
-    candleHigh: high,
-    candleLow: low,
-    isGreen,
+    candleOpen: open, candleClose: close, candleHigh: high, candleLow: low, isGreen,
   };
 }
 
-// ── Process Signal ──
+// ── Process Signal (live) ──
 function processSignal(symbol, signal, tf, price) {
   const key = `${symbol}:${tf.name}:${signal.signalTime}`;
   if (processedCandles[key]) return;
@@ -165,7 +164,6 @@ function processSignal(symbol, signal, tf, price) {
   const sl = isBuy ? signal.candleLow : signal.candleHigh;
   const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
 
-  // Check available = total equity - locked margin (including unrealized PnL)
   const currentOpenUpl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
   if (balance + currentOpenUpl - lockedMargin < margin) return;
 
@@ -177,19 +175,17 @@ function processSignal(symbol, signal, tf, price) {
   totalFees = fl4(totalFees + entryFee);
   balance = fl2(balance - entryFee);
 
-  // TP time: 2 candle durations from signal time
-  const candleMs = tf.name === '15m' ? 900000 : (tf.name === '1H' ? 3600000 : (tf.name === '4H' ? 14400000 : 86400000));
-  const tpTime = Date.now() + candleMs * 2; // exit after 2 candles
+  // TP: 2 candle durations from signal candle end
+  const CANDLE_MS = 86400000;
+  const signalEndMs = signal.signalTime + CANDLE_MS;
+  const tpTime = signalEndMs + CANDLE_MS * 2;
 
-  // Skip if entry would immediately hit SL
   if (isBuy && entry <= sl) return;
   if (!isBuy && entry >= sl) return;
 
-  const btcSide = isBuy ? 'open_long' : 'open_short';
-
   const pos = {
     id: Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
-    symbol, side: btcSide, direction: signal.direction,
+    symbol, side: isBuy ? 'open_long' : 'open_short', direction: signal.direction,
     entryPrice: entry, slPrice: sl, tpPrice: null,
     signalCandleLow: signal.candleLow, signalCandleHigh: signal.candleHigh,
     signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
@@ -208,7 +204,8 @@ function processSignal(symbol, signal, tf, price) {
   }
 
   signalLog.push({
-    symbol, side: btcSide, entryPrice: entry, slPrice: sl, candleOpen: signal.candleOpen, candleClose: signal.candleClose,
+    symbol, side: pos.side, entryPrice: entry, slPrice: sl,
+    candleOpen: signal.candleOpen, candleClose: signal.candleClose,
     timeframe: tf.name, direction: signal.direction, time: Date.now(),
   });
   if (signalLog.length > 200) signalLog = signalLog.slice(-200);
@@ -216,6 +213,82 @@ function processSignal(symbol, signal, tf, price) {
   logFn(`📊 ${signal.direction} ${symbol} (${tf.name}) | Entry: $${entry} | SL: $${sl} | Candle: O$${signal.candleOpen} C$${signal.candleClose}`);
   saveState();
   emitFn('snapshot', buildSnapshot());
+}
+
+// ── Backfill 10 Days of 1D History ──
+let backfillDone = false;
+
+async function backfillHistory() {
+  if (backfillDone) return;
+  backfillDone = true;
+  if (activeSymbols.length === 0) return;
+
+  logFn(`📚 Backfilling 10 days of 1D signals for ${activeSymbols.length} pairs...`);
+  let histTrades = 0;
+
+  for (const symbol of activeSymbols) {
+    const candles = await getCandles(symbol, '1D', 15);
+    if (!Array.isArray(candles) || candles.length < 5) continue;
+
+    // candles[0] oldest, candles[last] newest (possibly forming)
+    // i = entry candle index, signal is candle i-1
+    for (let i = 3; i < candles.length - 1; i++) {
+      const slice = candles.slice(0, i + 1);
+      const signal = checkCandleSignal(slice);
+      if (!signal) continue;
+
+      const key = `${symbol}:1D:${signal.signalTime}`;
+      if (processedCandles[key]) continue;
+      processedCandles[key] = true;
+
+      const entryCandle = candles[i];
+      const entry = parseFloat(entryCandle[1]);
+      if (!entry) continue;
+
+      const isBuy = signal.direction === 'BUY';
+      const sl = isBuy ? signal.candleLow : signal.candleHigh;
+      if (isBuy && entry <= sl) continue;
+      if (!isBuy && entry >= sl) continue;
+
+      const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
+      const size = fl2(margin * LEVERAGE);
+      const entryFee = fl2(size * TAKER_FEE);
+
+      // Find exit: scan next 2 candles for SL hit, else close at exit candle
+      const exitIdx = Math.min(i + 2, candles.length - 1);
+      let exitPrice = null, exitReason = 'TP_TIME';
+      for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
+        const cLow = parseFloat(candles[j][3]);
+        const cHigh = parseFloat(candles[j][2]);
+        if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+        if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+      }
+      if (!exitPrice) exitPrice = parseFloat(candles[exitIdx][4]);
+
+      const diff = isBuy ? (exitPrice - entry) : (entry - exitPrice);
+      const tradingPnl = (diff / entry) * size;
+      const exitFee = fl2(size * TAKER_FEE);
+      const netPnl = fl2(tradingPnl - exitFee - entryFee);
+
+      totalFees = fl4(totalFees + entryFee + exitFee);
+      balance = fl2(balance + tradingPnl - exitFee - entryFee);
+      totalRealizedPnl = fl4(totalRealizedPnl + netPnl);
+      if (netPnl >= 0) wins++; else losses++;
+
+      trades.push({
+        symbol, direction: signal.direction, side: isBuy ? 'open_long' : 'open_short',
+        entryPrice: entry, slPrice: sl, exitPrice, pnl: netPnl, margin, size,
+        entryFee, timeframe: '1D', exitReason,
+        signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
+        time: parseInt(entryCandle[0]), closeTime: parseInt(candles[exitIdx][0]) + 86400000,
+      });
+      histTrades++;
+    }
+  }
+
+  if (trades.length > 500) trades = trades.slice(-500);
+  logFn(`📚 Backfill: ${histTrades} historical trades | Bal: $${fl2(balance)}`);
+  saveState();
 }
 
 // ── Update Positions ──
@@ -232,39 +305,26 @@ async function updatePositions() {
     const diff = isLong ? (price - pos.entryPrice) : (pos.entryPrice - price);
     pos.unrealizedPnl = fl2((diff / pos.entryPrice) * pos.size);
 
-    let closed = false;
-    let pnl = 0;
-    let reason = '';
+    let closed = false, pnl = 0, reason = '';
 
-    // Check SL — loss = actual price move × position size
     if (isLong && price <= pos.slPrice) {
       pnl = fl2(((pos.slPrice - pos.entryPrice) / pos.entryPrice) * pos.size);
-      reason = 'SL';
-      closed = true;
+      reason = 'SL'; closed = true;
     } else if (!isLong && price >= pos.slPrice) {
       pnl = fl2(((pos.entryPrice - pos.slPrice) / pos.entryPrice) * pos.size);
-      reason = 'SL';
-      closed = true;
+      reason = 'SL'; closed = true;
     }
 
-    // Check TP (time-based)
     if (!closed && Date.now() >= pos.tpTime) {
-      // Exit at current price after 2 candles
       const exitPnl = (diff / pos.entryPrice) * pos.size;
-      pnl = fl2(exitPnl);
-      reason = 'TP_TIME';
-      closed = true;
+      pnl = fl2(exitPnl); reason = 'TP_TIME'; closed = true;
     }
 
     if (closed) {
       const exitFee = fl2(pos.size * TAKER_FEE);
       totalFees = fl4(totalFees + exitFee);
       pnl = fl2(pnl - exitFee);
-
-      // True net PnL = trading PnL - entry fee - exit fee
-      // entry fee was already subtracted from balance at position open
       const netPnl = fl2(pnl - pos.entryFee);
-
       pos.status = 'closed';
       pos.closeTime = Date.now();
       pos.pnl = netPnl;
@@ -272,22 +332,20 @@ async function updatePositions() {
       pos.exitPrice = price;
       totalRealizedPnl = fl4(totalRealizedPnl + netPnl);
       lockedMargin = fl2(lockedMargin - pos.margin);
-      balance = fl2(balance + pnl); // balance already had entryFee subtracted at entry
-
+      balance = fl2(balance + pnl);
       if (netPnl >= 0) wins++; else losses++;
       trades.push({ ...pos });
-      if (trades.length > 200) trades = trades.slice(-200);
+      if (trades.length > 500) trades = trades.slice(-500);
       positions.splice(i, 1);
-
       const emoji = reason === 'SL' ? '🔴' : '🟢';
-      logFn(`${emoji} ${reason} ${pos.symbol} (${pos.timeframe}) | Entry:$${pos.entryPrice} SL:$${pos.slPrice} | PnL:$${fl2(pos.pnl)}`);
+      logFn(`${emoji} ${reason} ${pos.symbol} (${pos.timeframe}) | Entry:$${pos.entryPrice} Exit:$${price} | PnL:$${fl2(pos.pnl)}`);
       saveState();
       emitFn('snapshot', buildSnapshot());
     }
   }
 }
 
-// ── Scan ──
+// ── Scan 1D Signals ──
 let lastScan = {};
 
 async function scan() {
@@ -300,44 +358,39 @@ async function scan() {
     if (now - (lastScan[tf.name] || 0) < tf.scanMs) continue;
     lastScan[tf.name] = now;
 
-    // Fetch candles in chunks of 5 to avoid overwhelming API
     const symbols = [...activeSymbols];
     const results = [];
     for (let i = 0; i < symbols.length; i += 5) {
       const chunk = symbols.slice(i, i + 5);
       const chunkResults = await Promise.all(chunk.map(async (symbol) => {
-      const candles = await getCandles(symbol, tf.granularity);
-      if (!Array.isArray(candles) || candles.length < 3) return null;
+        const candles = await getCandles(symbol, tf.granularity, 10);
+        if (!Array.isArray(candles) || candles.length < 3) return null;
 
-      const prev = candles[candles.length - 2];
-      const prevEndTs = parseInt(prev[0]);
-      const candleDuration = tf.name === '15m' ? 900000 : (tf.name === '1H' ? 3600000 : (tf.name === '4H' ? 14400000 : 86400000));
-      const candleEndTime = prevEndTs + candleDuration;
+        const prev = candles[candles.length - 2];
+        const prevEndTs = parseInt(prev[0]);
+        const CANDLE_MS = 86400000;
+        const candleEndTime = prevEndTs + CANDLE_MS;
 
-      if (now < candleEndTime) return null;
-      if (now - candleEndTime > candleDuration * 1.5) return null;
+        if (now < candleEndTime) return null;
+        if (now - candleEndTime > CANDLE_MS * 1.5) return null; // too old for live
 
-      const signal = checkCandleSignal(candles);
-      
-      // Update monitored pair candle data per timeframe
-      const pair = monitoredPairs.find(m => m.symbol === symbol);
-      if (pair && candles.length >= 2) {
-        if (!pair.lastCandle) pair.lastCandle = {};
-        pair.lastCandle[tf.name] = {
-          open: parseFloat(prev[1]) || 0,
-          high: parseFloat(prev[2]) || 0,
-          low: parseFloat(prev[3]) || 0,
-          close: parseFloat(prev[4]) || 0,
-        };
-      }
-      
-      if (!signal) return null;
-      return { symbol, signal, tf, pair };
-    }));
+        const signal = checkCandleSignal(candles);
 
+        const pair = monitoredPairs.find(m => m.symbol === symbol);
+        if (pair && candles.length >= 2) {
+          if (!pair.lastCandle) pair.lastCandle = {};
+          pair.lastCandle[tf.name] = {
+            open: parseFloat(prev[1]) || 0,
+            high: parseFloat(prev[2]) || 0,
+            low: parseFloat(prev[3]) || 0,
+            close: parseFloat(prev[4]) || 0,
+          };
+        }
+        if (!signal) return null;
+        return { symbol, signal, tf, pair };
+      }));
       results.push(...chunkResults);
     }
-    // Process signals
     for (const r of results) {
       if (!r) continue;
       const { symbol, signal, tf, pair } = r;
@@ -355,7 +408,7 @@ function saveState() {
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify({
       stateVersion: STATE_VERSION, balance, lockedMargin, totalRealizedPnl, totalFees, wins, losses,
-      trades: trades.slice(-200), positions: positions.filter(p => p.status === 'open'),
+      trades: trades.slice(-300), positions: positions.filter(p => p.status === 'open'),
       signalLog: signalLog.slice(-200), processedCandles,
     }, null, 2));
   } catch (_) {}
@@ -384,7 +437,7 @@ function loadState() {
 function buildSnapshot() {
   const openUpl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
   const totalMargin = positions.reduce((s, p) => s + (p.margin || 0), 0);
-  const totalEquity = fl2(balance + openUpl); // balance already has fees subtracted
+  const totalEquity = fl2(balance + openUpl);
   const availableBalance = fl2(totalEquity - totalMargin);
   return {
     balance: totalEquity,
@@ -444,14 +497,26 @@ async function tick() {
 async function start(emit, logEmit) {
   emitFn = emit; logFn = logEmit; startTime = Date.now();
   loadState();
-  logFn(`✅ Candle Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 15m/1H/4H/1D`);
-  logFn(`📊 Signal: prev candle color | Entry: next open | SL: candle low/high | TP: 2 candles`);
+  logFn(`✅ Candle Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 1D only`);
+  logFn(`📊 Signal: prev candle color | Entry: next open | SL: candle low/high | TP: 2 days`);
+
+  // Initial pair fetch and backfill
+  await refreshTopPairs();
+  await backfillHistory();
+
+  // Schedule daily pair refresh at 23:50 UTC
+  setTimeout(async function refreshLoop() {
+    await refreshTopPairs();
+    setTimeout(refreshLoop, getMsUntilNextRefresh());
+  }, getMsUntilNextRefresh());
+
+  // Live trading loop
   setTimeout(tick, 5000);
   setInterval(tick, 60000);
-  // Fast price update loop for live dashboard (every 5s)
+
+  // Fast price update for dashboard
   setInterval(async () => {
     try {
-      // Update pair prices from ticker cache
       for (const p of monitoredPairs) {
         const t = tickerCache.find(tc => tc.symbol === p.symbol);
         if (t) p.price = parseFloat(t.lastPr || t.markPrice || 0) || p.price;
@@ -460,24 +525,23 @@ async function start(emit, logEmit) {
       emitFn('snapshot', buildSnapshot());
     } catch(e) {}
   }, 5000);
+
   emitFn('snapshot', buildSnapshot());
 }
 
-
-
-// ── Backtest ──
+// ── Backtest (kept for dashboard) ──
 async function fetchAllCandles(symbol, granularity) {
-  // Bitget API returns up to 200 candles (most recent data)
-  // 15m: ~2 days, 1H: ~8 days, 4H: ~33 days, 1D: ~90 days
   const data = await publicGet(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${granularity}&limit=200`);
-  return Array.isArray(data) ? data : [];
+  if (!Array.isArray(data)) return [];
+  // Return oldest first
+  return data.reverse();
 }
 
-async function runBacktest(options = {}) {
-  const { daysBack = 30, topPairs = 5 } = options;
-  const results = { timeframe: {}, overall: { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0, winRate: 0 } };
-  
-  // Get top gainers/losers
+async function runBacktest(opts = {}) {
+  const topPairs = opts.topPairs || 5;
+  const daysBack = 30;
+  const results = { overall: { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0, winRate: 0, roi: 0 }, timeframe: {} };
+
   const tickers = await getAllTickers();
   if (!Array.isArray(tickers)) return { error: 'Failed to fetch tickers' };
   const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
@@ -491,80 +555,59 @@ async function runBacktest(options = {}) {
     ...withChange.slice(0, topPairs).map(t => t.symbol),
     ...withChange.slice(-topPairs).reverse().map(t => t.symbol)
   ];
-  const uniqueSymbols = [...new Set(symbols)];
-  
-  for (const symbol of uniqueSymbols) {
+
+  for (const symbol of [...new Set(symbols)]) {
     for (const tf of TIMEFRAMES) {
       const tfKey = tf.name;
       if (!results.timeframe[tfKey]) results.timeframe[tfKey] = { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0 };
-      
-      const candles = await fetchAllCandles(symbol, tf.granularity, daysBack);
+
+      const candles = await fetchAllCandles(symbol, tf.granularity);
       if (candles.length < 3) continue;
-      
-      // Run strategy: iterate through candles, check signal on each closed candle
+
       let btBalance = DEMO_BALANCE;
-      let btPositions = [];
-      let btTrades = [];
-      
       for (let i = 2; i < candles.length; i++) {
-        // Get slice of last 3 candles up to index i
         const slice = candles.slice(0, i + 1);
         const signal = checkCandleSignal(slice);
         if (!signal) continue;
-        
+
         const isBuy = signal.direction === 'BUY';
-        const entryCandle = candles[i]; // candle after signal
+        const entryCandle = candles[i];
         if (!entryCandle) continue;
-        const entry = parseFloat(entryCandle[1]); // open of next candle
+        const entry = parseFloat(entryCandle[1]);
         if (!entry) continue;
-        
+
         const sl = isBuy ? signal.candleLow : signal.candleHigh;
         const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
         if (btBalance < margin) continue;
-        
         const size = fl2(margin * LEVERAGE);
         const entryFee = fl2(size * TAKER_FEE);
         btBalance = fl2(btBalance - entryFee);
-        
-        // Find exit: scan forward 2 candle durations for SL hit or time exit
-        const candleMs = tf.name === '15m' ? 900000 : (tf.name === '1H' ? 3600000 : (tf.name === '4H' ? 14400000 : 86400000));
-        const exitIdx = Math.min(i + 2, candles.length - 1); // exit after 2 candles
-        let exitPrice = null;
-        let exitReason = 'TP_TIME';
-        
-        // Check SL in the next 2 candles
+
+        const exitIdx = Math.min(i + 2, candles.length - 1);
+        let exitPrice = null, exitReason = 'TP_TIME';
         for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
-          const c = candles[j];
-          const cLow = parseFloat(c[3]);
-          const cHigh = parseFloat(c[2]);
+          const cLow = parseFloat(candles[j][3]);
+          const cHigh = parseFloat(candles[j][2]);
           if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
           if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
         }
-        
-        if (!exitPrice) {
-          exitPrice = parseFloat(candles[exitIdx][4]); // close of exit candle
-        }
-        
+        if (!exitPrice) exitPrice = parseFloat(candles[exitIdx][4]);
+
         const diff = isBuy ? (exitPrice - entry) : (entry - exitPrice);
         const tradingPnl = (diff / entry) * size;
         const exitFee = fl2(size * TAKER_FEE);
         const netPnl = fl2(tradingPnl - exitFee - entryFee);
-        
         btBalance = fl2(btBalance + tradingPnl - exitFee);
-        
+
         const tfResult = results.timeframe[tfKey];
         tfResult.trades++;
         tfResult.pnl = fl4(tfResult.pnl + netPnl);
         tfResult.fees = fl4(tfResult.fees + entryFee + exitFee);
         if (netPnl >= 0) tfResult.wins++; else tfResult.losses++;
-        
-        btTrades.push({ symbol, direction: signal.direction, entry, exitPrice, pnl: netPnl, exitReason, time: entryCandle[0] });
       }
-      
     }
   }
-  
-  // Aggregate overall results after all symbols processed
+
   const o = results.overall;
   for (const tfKey of Object.keys(results.timeframe)) {
     const tf = results.timeframe[tfKey];
@@ -574,11 +617,8 @@ async function runBacktest(options = {}) {
     o.pnl = fl4(o.pnl + tf.pnl);
     o.fees = fl4(o.fees + tf.fees);
   }
-  
-  results.overall.winRate = results.overall.trades > 0 
-    ? fl4((results.overall.wins / results.overall.trades) * 100) : 0;
+  results.overall.winRate = results.overall.trades > 0 ? fl4((results.overall.wins / results.overall.trades) * 100) : 0;
   results.overall.roi = fl4((results.overall.pnl / DEMO_BALANCE) * 100);
-  
   return results;
 }
 
