@@ -70,19 +70,19 @@ async function getTicker(symbol) {
   return tickerCache.find(t => t.symbol === symbol) || null;
 }
 
-// ── Pair Selection (daily refresh at 23:50 UTC) ──
+// ── Pair Selection (daily refresh at 15:50 UTC) ──
 let lastPairRefresh = 0;
 let activeSymbols = [];
 
 function getMsUntilNextRefresh() {
   const now = new Date();
-  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 50, 0, 0));
+  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 15, 50, 0, 0));
   if (now >= utc) utc.setUTCDate(utc.getUTCDate() + 1);
   return utc - now;
 }
 
 async function refreshTopPairs() {
-  // Only refresh at 23:50 UTC daily (or forced on first run)
+  // Only refresh at 15:50 UTC daily (or forced on first run)
   const now = new Date();
   const utcH = now.getUTCHours(), utcM = now.getUTCMinutes();
   const isRefreshTime = utcH === 23 && utcM >= 48 && utcM <= 55;
@@ -504,7 +504,7 @@ async function start(emit, logEmit) {
   await refreshTopPairs();
   await backfillHistory();
 
-  // Schedule daily pair refresh at 23:50 UTC
+  // Schedule daily pair refresh at 15:50 UTC
   setTimeout(async function refreshLoop() {
     await refreshTopPairs();
     setTimeout(refreshLoop, getMsUntilNextRefresh());
