@@ -223,11 +223,11 @@ async function backfillHistory() {
   backfillDone = true;
   if (activeSymbols.length === 0) return;
 
-  logFn(`📚 Backfilling 10 days of 1D signals for ${activeSymbols.length} pairs...`);
+  logFn(`📚 Backfilling 1 day of 1D signals for ${activeSymbols.length} pairs...`);
   let histTrades = 0;
 
   for (const symbol of activeSymbols) {
-    const candles = await getCandles(symbol, '1D', 15);
+    const candles = await getCandles(symbol, '1D', 5);
     if (!Array.isArray(candles) || candles.length < 5) continue;
 
     // candles[0] oldest, candles[last] newest (possibly forming)
