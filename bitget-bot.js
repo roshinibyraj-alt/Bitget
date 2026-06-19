@@ -12,7 +12,7 @@ const TAKER_FEE = 0.0006;
 
 const STATE_FILE = path.join(__dirname, 'state.json');
 const STATE_VERSION = 8;
-const NEW_PAIR_DAYS = 30; // only pairs listed within this many days
+const MAX_VOLATILE_PAIRS = 40; // top volatile pairs to monitor
 
 const TIMEFRAMES = [
   { name: '1D', granularity: '1D', scanMs: 86400000 },
@@ -93,27 +93,53 @@ async function refreshPairs() {
   // Don't refresh more than once per minute (avoids spamming API)
   if (!isFirstRun && Date.now() - lastPairRefresh < 60000) return;
 
-  const contracts = await fetchContracts();
+  // Fetch contracts (for status validation) and tickers (for volatility)
+  const [contracts, tickers] = await Promise.all([
+    fetchContracts(),
+    publicGet('/api/v2/mix/market/tickers?productType=USDT-FUTURES')
+  ]);
   if (!Array.isArray(contracts)) return;
   
-  const now = Date.now();
-  const cutoff = now - NEW_PAIR_DAYS * 86400000;
-  
-  // Filter: USDT, normal status, listed within last 30 days
-  const newPairs = contracts.filter(c =>
-    c.symbol.endsWith('USDT') &&
-    c.symbolStatus === 'normal' &&
-    c.openTime && parseInt(c.openTime) >= cutoff
+  const contractSet = new Set(
+    contracts.filter(c => c.symbol.endsWith('USDT') && c.symbolStatus === 'normal').map(c => c.symbol)
   );
   
-  activeSymbols = newPairs.map(c => c.symbol);
+  if (!Array.isArray(tickers)) {
+    // Fallback: use contracts list without volatility filter
+    activeSymbols = [...contractSet].slice(0, MAX_VOLATILE_PAIRS);
+  } else {
+    // Calculate 24h volatility range % for each pair
+    const withVol = tickers
+      .filter(t => contractSet.has(t.symbol)) // only active contracts
+      .map(t => {
+        const high = parseFloat(t.high24h || 0);
+        const low = parseFloat(t.low24h || 0);
+        const volume = parseFloat(t.usdtVolume || 0);
+        const volPct = low > 0 ? ((high - low) / low) * 100 : 0;
+        return { symbol: t.symbol, volPct, volume, price: parseFloat(t.lastPr || 0), change: parseFloat(t.change24h || 0) };
+      })
+      .filter(t => t.volume > 100000 && t.volPct > 0); // minimum $100k volume
+    
+    // Sort by volatility descending, pick top MAX_VOLATILE_PAIRS
+    withVol.sort((a, b) => b.volPct - a.volPct);
+    activeSymbols = withVol.slice(0, MAX_VOLATILE_PAIRS).map(t => t.symbol);
+    
+    // Pre-populate price and change for monitoredPairs
+    const volMap = new Map(withVol.map(t => [t.symbol, t]));
+    for (const v of withVol) {
+      if (!monitoredPairs.find(m => m.symbol === v.symbol)) {
+        monitoredPairs.push({ symbol: v.symbol, price: v.price, change: v.change * 100, lastSignal: null, lastCandle: {} });
+      }
+    }
+  }
+  
   lastPairRefresh = Date.now();
 
   // Keep pairs with open positions
   const posSymbols = new Set(positions.filter(p => p.status === 'open').map(p => p.symbol));
   const activeSet = new Set(activeSymbols);
 
-  // Add new pairs
+  // Add new pairs (if not already added by volMap loop above)
   for (const s of activeSymbols) {
     if (!monitoredPairs.find(m => m.symbol === s)) {
       monitoredPairs.push({ symbol: s, price: 0, change: 0, lastSignal: null, lastCandle: {} });
@@ -128,7 +154,7 @@ async function refreshPairs() {
     if (!activeSet.has(sym) && !posSymbols.has(sym)) delete processedCandles[key];
   }
 
-  logFn(`📋 ${activeSymbols.length} pairs listed in last ${NEW_PAIR_DAYS} days`);
+  logFn('📋 ' + activeSymbols.length + ' high-volatility pairs monitored (top ' + MAX_VOLATILE_PAIRS + ')');
 }
 
 // ── Candle Color Signal: 3+ consecutive → reversal ──
@@ -587,15 +613,33 @@ async function runBacktest(opts = {}) {
   const daysBack = 30;
   const results = { overall: { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0, winRate: 0, roi: 0 }, timeframe: {} };
 
-  const contracts = await fetchContracts();
+  const [contracts, tickers] = await Promise.all([
+    fetchContracts(),
+    publicGet('/api/v2/mix/market/tickers?productType=USDT-FUTURES')
+  ]);
   if (!Array.isArray(contracts)) return { error: 'Failed to fetch contracts' };
-  const now = Date.now();
-  const cutoff = now - NEW_PAIR_DAYS * 86400000;
-  const newPairs = contracts.filter(c =>
-    c.symbol.endsWith('USDT') && c.symbolStatus === 'normal' &&
-    c.openTime && parseInt(c.openTime) >= cutoff
+  
+  const contractSet = new Set(
+    contracts.filter(c => c.symbol.endsWith('USDT') && c.symbolStatus === 'normal').map(c => c.symbol)
   );
-  const symbols = newPairs.map(c => c.symbol).slice(0, topPairs);
+  
+  let symbols = [];
+  if (Array.isArray(tickers)) {
+    const withVol = tickers
+      .filter(t => contractSet.has(t.symbol))
+      .map(t => {
+        const high = parseFloat(t.high24h || 0);
+        const low = parseFloat(t.low24h || 0);
+        const volume = parseFloat(t.usdtVolume || 0);
+        const volPct = low > 0 ? ((high - low) / low) * 100 : 0;
+        return { symbol: t.symbol, volPct, volume };
+      })
+      .filter(t => t.volume > 100000 && t.volPct > 0);
+    withVol.sort((a, b) => b.volPct - a.volPct);
+    symbols = withVol.slice(0, topPairs).map(t => t.symbol);
+  } else {
+    symbols = [...contractSet].slice(0, topPairs);
+  }
 
   for (const symbol of [...new Set(symbols)]) {
     for (const tf of TIMEFRAMES) {
