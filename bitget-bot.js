@@ -12,7 +12,7 @@ const TAKER_FEE = 0.0006;
 
 const STATE_FILE = path.join(__dirname, 'state.json');
 const STATE_VERSION = 8;
-const MIN_VOLUME = 5000000; // $5M minimum
+const NEW_PAIR_DAYS = 30; // only pairs listed within this many days
 
 const TIMEFRAMES = [
   { name: '1D', granularity: '1D', scanMs: 86400000 },
@@ -58,6 +58,10 @@ async function getCandles(symbol, granularity, limit) {
   return await publicGet(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${granularity}&limit=${limit || 10}`);
 }
 
+async function fetchContracts() {
+  return await publicGet('/api/v2/mix/market/contracts?productType=USDT-FUTURES');
+}
+
 let tickerCache = [];
 let tickerCacheTime = 0;
 
@@ -78,12 +82,20 @@ async function refreshPairs() {
   const isFirstRun = lastPairRefresh === 0;
   if (!isFirstRun && activeSymbols.length > 0) return; // refresh once at start
 
-  const tickers = await getAllTickers();
-  if (!Array.isArray(tickers)) return;
-  const volumeFiltered = tickers.filter(t =>
-    t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME
+  const contracts = await fetchContracts();
+  if (!Array.isArray(contracts)) return;
+  
+  const now = Date.now();
+  const cutoff = now - NEW_PAIR_DAYS * 86400000;
+  
+  // Filter: USDT, normal status, listed within last 30 days
+  const newPairs = contracts.filter(c =>
+    c.symbol.endsWith('USDT') &&
+    c.symbolStatus === 'normal' &&
+    c.openTime && parseInt(c.openTime) >= cutoff
   );
-  activeSymbols = volumeFiltered.map(t => t.symbol);
+  
+  activeSymbols = newPairs.map(c => c.symbol);
   lastPairRefresh = Date.now();
 
   // Keep pairs with open positions
@@ -105,7 +117,7 @@ async function refreshPairs() {
     if (!activeSet.has(sym) && !posSymbols.has(sym)) delete processedCandles[key];
   }
 
-  logFn(`📋 ${activeSymbols.length} pairs with ≥ $5M volume`);
+  logFn(`📋 ${activeSymbols.length} pairs listed in last ${NEW_PAIR_DAYS} days`);
 }
 
 // ── Candle Color Signal: 3+ consecutive → reversal ──
@@ -539,10 +551,15 @@ async function runBacktest(opts = {}) {
   const daysBack = 30;
   const results = { overall: { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0, winRate: 0, roi: 0 }, timeframe: {} };
 
-  const tickers = await getAllTickers();
-  if (!Array.isArray(tickers)) return { error: 'Failed to fetch tickers' };
-  const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
-  const symbols = usdt.map(t => t.symbol).slice(0, topPairs);
+  const contracts = await fetchContracts();
+  if (!Array.isArray(contracts)) return { error: 'Failed to fetch contracts' };
+  const now = Date.now();
+  const cutoff = now - NEW_PAIR_DAYS * 86400000;
+  const newPairs = contracts.filter(c =>
+    c.symbol.endsWith('USDT') && c.symbolStatus === 'normal' &&
+    c.openTime && parseInt(c.openTime) >= cutoff
+  );
+  const symbols = newPairs.map(c => c.symbol).slice(0, topPairs);
 
   for (const symbol of [...new Set(symbols)]) {
     for (const tf of TIMEFRAMES) {
