@@ -15,16 +15,13 @@ const STATE_VERSION = 8;
 const MAX_VOLATILE_PAIRS = 40; // top volatile pairs to monitor
 
 const TIMEFRAMES = [
-  { name: '1H', granularity: '1H', scanMs: 3600000 },
   { name: '4H', granularity: '4H', scanMs: 14400000 },
-  { name: '12H', granularity: '12H', scanMs: 43200000 },
-  { name: '1D', granularity: '1D', scanMs: 86400000 },
 ];
 
 // ── Helper to convert granularity to candle duration in ms ──
 function candleMs(granularity) {
-  const map = { '1H': 3600000, '4H': 14400000, '12H': 43200000, '1D': 86400000 };
-  return map[granularity] || 86400000;
+  const map = { '4H': 14400000 };
+  return map[granularity] || 14400000;
 }
 
 // ── Daily Refresh Schedule (15:50 UTC) ──
@@ -284,7 +281,7 @@ async function backfillHistory() {
   // Process each timeframe sequentially, pairs concurrently in batches
   for (const tf of TIMEFRAMES) {
     logFn('⏳ Backfilling ' + tf.name + '...');
-    const limit = tf.name === '1D' ? 15 : (tf.name === '12H' ? 30 : 60);
+    const limit = 60;
     const batchSize = 10;
     for (let batchStart = 0; batchStart < activeSymbols.length; batchStart += batchSize) {
       const batch = activeSymbols.slice(batchStart, batchStart + batchSize);

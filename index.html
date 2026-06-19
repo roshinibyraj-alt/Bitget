@@ -141,7 +141,7 @@ function render(d){
       var sideCls=p.direction==='BUY'?'badge-buy':'badge-sell';
       var sideTxt=p.direction==='BUY'?'LONG':'SHORT';
       var uPnl=p.unrealizedPnl||0;
-      var tfCls=p.timeframe==='1D'?'badge-1d':(p.timeframe==='12H'?'badge-12h':(p.timeframe==='4H'?'badge-4h':(p.timeframe==='1H'?'badge-1h':'badge-15m')));
+      var tfCls='badge-4h';
       var remaining=p.tpTime?Math.max(0,Math.floor((p.tpTime-Date.now())/60000))+'m':'—';
       h+='<tr>'+
         '<td><strong>'+p.symbol+'</strong></td>'+
@@ -170,7 +170,7 @@ function render(d){
     sigs.forEach(function(s){
       var sideCls=s.direction==='BUY'?'badge-buy':'badge-sell';
       var tf=s.timeframe||'—';
-      var tfCls=tf==='1D'?'badge-1d':(tf==='12H'?'badge-12h':(tf==='4H'?'badge-4h':(tf==='1H'?'badge-1h':'badge-15m')));
+      var tfCls='badge-4h';
       var candleDir=s.side && s.side.indexOf('long')>=0 ? '🟢' : '🔴';
       var candleLabel=s.candleOpen && s.candleClose 
         ? (s.candleClose > s.candleOpen ? '🟢 GREEN' : '🔴 RED')
@@ -194,8 +194,8 @@ function render(d){
   if(!pairs.length){
     pl2.innerHTML='<div class="empty">Scanning pairs...</div>';
   }else{
-    var tfs=['15m','1H','4H','12H','1D'];
-    var p2h='<table><tr><th>Pair</th><th>Price</th><th>24h Chg</th><th>1H</th><th>4H</th><th>12H</th><th>1D</th><th>Signal</th></tr>';
+    var tfs=['4H'];
+    var p2h='<table><tr><th>Pair</th><th>Price</th><th>24h Chg</th><th>4H</th><th>Signal</th></tr>';
     pairs.forEach(function(p){
       var sigHtml='<span style="color:var(--muted);font-size:9px">—</span>';
       if(p.lastSignal){
@@ -212,10 +212,7 @@ function render(d){
         '<td><strong>'+p.symbol+'</strong></td>'+
         '<td>$'+fmt(p.price)+'</td>'+
         '<td style="color:'+cls(p.change)+'">'+(p.change? (p.change>0?'+':'')+p.change.toFixed(2)+'%':'—')+'</td>'+
-        candleCell(p,'1H')+
         candleCell(p,'4H')+
-        candleCell(p,'12H')+
-        candleCell(p,'1D')+
         '<td>'+sigHtml+'</td>'+
       '</tr>';
     });
@@ -235,7 +232,7 @@ function render(d){
       var sCls=t.direction==='BUY'?'badge-buy':'badge-sell';
       var sTxt=t.direction==='BUY'?'LONG':'SHORT';
       var tPnl=t.pnl||0;
-      var tfCls=t.timeframe==='1D'?'badge-1d':(t.timeframe==='12H'?'badge-12h':(t.timeframe==='4H'?'badge-4h':(t.timeframe==='1H'?'badge-1h':'badge-15m')));
+      var tfCls='badge-4h';
       var reasonBadge=t.exitReason==='SL'?'🔴 SL':'🟢 TP';
       th+='<tr>'+
         '<td><strong>'+t.symbol+'</strong></td>'+
@@ -281,30 +278,14 @@ function checkBacktestResult(){
 function renderBacktest(d){
   var el=document.getElementById('bt-list');
   document.getElementById('bt-count').textContent='('+d.overall.trades+' trades)';
-  var h='<table style="font-size:10px"><tr><th>Metric</th><th>Overall</th><th>1H</th><th>4H</th><th>12H</th><th>1D</th></tr>';
+  var h='<table style="font-size:10px"><tr><th>Metric</th><th>Value</th></tr>';
   var tfs=d.timeframe||{};
   function cell(tf,key){var v=tf?tf[key]:0;return typeof v==='number'?fmt(v):v;}
-  h+='<tr><td><strong>Trades</strong></td><td>'+d.overall.trades+'</td>'+
-    '<td>'+(tfs['1H']?tfs['1H'].trades:0)+'</td>'+
-    '<td>'+(tfs['4H']?tfs['4H'].trades:0)+'</td>'+
-    '<td>'+(tfs['12H']?tfs['12H'].trades:0)+'</td>'+
-    '<td>'+(tfs['1D']?tfs['1D'].trades:0)+'</td></tr>';
-  h+='<tr><td><strong>Win Rate</strong></td><td>'+d.overall.winRate+'%</td>'+
-    '<td>'+(tfs['1H']?((tfs['1H'].wins/(tfs['1H'].trades||1)*100).toFixed(1)):0)+'%</td>'+
-    '<td>'+(tfs['4H']?((tfs['4H'].wins/(tfs['4H'].trades||1)*100).toFixed(1)):0)+'%</td>'+
-    '<td>'+(tfs['12H']?((tfs['12H'].wins/(tfs['12H'].trades||1)*100).toFixed(1)):0)+'%</td>'+
-    '<td>'+(tfs['1D']?((tfs['1D'].wins/(tfs['1D'].trades||1)*100).toFixed(1)):0)+'%</td></tr>';
-  h+='<tr><td><strong>PnL</strong></td><td style="color:'+cls(d.overall.pnl)+'">$'+fmtP(d.overall.pnl)+'</td>'+
-    '<td style="color:'+cls((tfs['1H']||{}).pnl)+'">$'+fmtP((tfs['1H']||{}).pnl||0)+'</td>'+
-    '<td style="color:'+cls((tfs['4H']||{}).pnl)+'">$'+fmtP((tfs['4H']||{}).pnl||0)+'</td>'+
-    '<td style="color:'+cls((tfs['12H']||{}).pnl)+'">$'+fmtP((tfs['12H']||{}).pnl||0)+'</td>'+
-    '<td style="color:'+cls((tfs['1D']||{}).pnl)+'">$'+fmtP((tfs['1D']||{}).pnl||0)+'</td></tr>';
-  h+='<tr><td><strong>Fees</strong></td><td>$'+fmt(d.overall.fees)+'</td>'+
-    '<td>$'+fmt((tfs['1H']||{}).fees||0)+'</td>'+
-    '<td>$'+fmt((tfs['4H']||{}).fees||0)+'</td>'+
-    '<td>$'+fmt((tfs['12H']||{}).fees||0)+'</td>'+
-    '<td>$'+fmt((tfs['1D']||{}).fees||0)+'</td></tr>';
-  h+='<tr><td><strong>ROI</strong></td><td>'+d.overall.roi+'%</td><td colspan="4"></td></tr>';
+  h+='<tr><td><strong>Trades</strong></td><td>'+d.overall.trades+'</td></tr>';
+  h+='<tr><td><strong>Win Rate</strong></td><td>'+d.overall.winRate+'%</td></tr>';
+  h+='<tr><td><strong>PnL</strong></td><td style="color:'+cls(d.overall.pnl)+'">$'+fmtP(d.overall.pnl)+'</td></tr>';
+  h+='<tr><td><strong>Fees</strong></td><td>$'+fmt(d.overall.fees)+'</td></tr>';
+  h+='<tr><td><strong>ROI</strong></td><td>'+d.overall.roi+'%</td></tr>';
   h+='</table>';
   el.innerHTML=h;
 }
