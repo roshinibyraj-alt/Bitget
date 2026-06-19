@@ -15,8 +15,17 @@ const STATE_VERSION = 8;
 const MAX_VOLATILE_PAIRS = 40; // top volatile pairs to monitor
 
 const TIMEFRAMES = [
+  { name: '1H', granularity: '1H', scanMs: 3600000 },
+  { name: '4H', granularity: '4H', scanMs: 14400000 },
+  { name: '12H', granularity: '12H', scanMs: 43200000 },
   { name: '1D', granularity: '1D', scanMs: 86400000 },
 ];
+
+// ── Helper to convert granularity to candle duration in ms ──
+function candleMs(granularity) {
+  const map = { '1H': 3600000, '4H': 14400000, '12H': 43200000, '1D': 86400000 };
+  return map[granularity] || 86400000;
+}
 
 // ── Daily Refresh Schedule (15:50 UTC) ──
 function getMsUntilNextRefresh() {
@@ -222,9 +231,9 @@ function processSignal(symbol, signal, tf, price) {
   balance = fl2(balance - entryFee);
 
   // TP: 2 candle durations from signal candle end
-  const CANDLE_MS = 86400000;
-  const signalEndMs = signal.signalTime + CANDLE_MS;
-  const tpTime = signalEndMs + CANDLE_MS * 2;
+  const ms = candleMs(tf.granularity);
+  const signalEndMs = signal.signalTime + ms;
+  const tpTime = signalEndMs + ms * 2;
 
   if (isBuy && entry <= sl) return;
   if (!isBuy && entry >= sl) return;
@@ -269,24 +278,27 @@ async function backfillHistory() {
   backfillDone = true;
   if (activeSymbols.length === 0) return;
 
-  logFn(`📚 Backfilling 10 days of 1D reversal signals for ${activeSymbols.length} pairs...`);
+  logFn('📚 Backfilling reversal signals for ' + activeSymbols.length + ' pairs across ' + TIMEFRAMES.length + ' timeframes...');
   let histTrades = 0;
 
-  // Process pairs concurrently in batches of 10
-  const batchSize = 10;
-  for (let batchStart = 0; batchStart < activeSymbols.length; batchStart += batchSize) {
-    const batch = activeSymbols.slice(batchStart, batchStart + batchSize);
-    const batchResults = await Promise.all(batch.map(async (symbol) => {
-      let localTrades = 0;
-      const candles = await getCandles(symbol, '1D', 15);
-      if (!Array.isArray(candles) || candles.length < 7) return 0;
+  // Process each timeframe sequentially, pairs concurrently in batches
+  for (const tf of TIMEFRAMES) {
+    logFn('⏳ Backfilling ' + tf.name + '...');
+    const limit = tf.name === '1D' ? 15 : (tf.name === '12H' ? 30 : 60);
+    const batchSize = 10;
+    for (let batchStart = 0; batchStart < activeSymbols.length; batchStart += batchSize) {
+      const batch = activeSymbols.slice(batchStart, batchStart + batchSize);
+      const batchResults = await Promise.all(batch.map(async (symbol) => {
+        let localTrades = 0;
+        const candles = await getCandles(symbol, tf.granularity, limit);
+        if (!Array.isArray(candles) || candles.length < 7) return 0;
       
       for (let i = 4; i < candles.length - 1; i++) {
         const slice = candles.slice(0, i + 1);
         const signal = checkCandleSignal(slice);
         if (!signal) continue;
 
-        const key = symbol + ':1D:' + signal.signalTime;
+        const key = symbol + ':' + tf.name + ':' + signal.signalTime;
         if (processedCandles[key]) continue;
         processedCandles[key] = true;
 
@@ -326,12 +338,12 @@ async function backfillHistory() {
         trades.push({
           symbol: symbol, direction: signal.direction,
           entryPrice: entry, slPrice: sl, exitPrice: exitPrice, pnl: netPnl,
-          margin: margin, size: size, entryFee: entryFee, timeframe: '1D',
+          margin: margin, size: size, entryFee: entryFee, timeframe: tf.name,
           exitReason: exitReason,
           signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
           consecutive: signal.consecutiveCount,
           time: parseInt(entryCandle[0]),
-          closeTime: parseInt(candles[exitIdx][0]) + 86400000,
+          closeTime: parseInt(candles[exitIdx][0]) + candleMs(tf.granularity),
         });
         localTrades++;
       }
@@ -354,6 +366,7 @@ async function backfillHistory() {
   balance = fl2(balance);
   logFn('📚 Backfill: ' + histTrades + ' historical trades | Bal: $' + fl2(balance));
   saveState();
+}
 }
 
 // ── Update Positions ──
@@ -433,11 +446,11 @@ async function scan() {
 
         const prev = candles[candles.length - 2];
         const prevEndTs = parseInt(prev[0]);
-        const CANDLE_MS = 86400000;
-        const candleEndTime = prevEndTs + CANDLE_MS;
+        const ms = candleMs(tf.granularity);
+        const candleEndTime = prevEndTs + ms;
 
         if (now < candleEndTime) return null;
-        if (now - candleEndTime > CANDLE_MS * 1.5) return null; // too old for live
+        if (now - candleEndTime > ms * 1.5) return null; // too old for live
 
         const signal = checkCandleSignal(candles);
         if (!signal) return null;
