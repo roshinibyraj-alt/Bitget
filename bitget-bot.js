@@ -12,7 +12,7 @@ const TAKER_FEE = 0.0006;
 
 const STATE_FILE = path.join(__dirname, 'state.json');
 const STATE_VERSION = 8;
-const MAX_VOLATILE_PAIRS = 40; // top volatile pairs to monitor
+const MAX_VOLATILE_PAIRS = 20; // top volatile pairs to monitor
 
 const TIMEFRAMES = [
   { name: '4H', granularity: '4H', scanMs: 14400000 },
@@ -213,7 +213,18 @@ function processSignal(symbol, signal, tf, price) {
 
   const isBuy = signal.direction === 'BUY';
   const entry = price;
-  const sl = isBuy ? signal.candleLow : signal.candleHigh;
+  // Skip low-signal candles (<0.5% range)
+  const candleRangePct = (signal.candleHigh - signal.candleLow) / (signal.candleLow || 1);
+  if (candleRangePct < 0.005) return;
+
+  // Wider SL: 1.5x candle range from entry
+  const candleRange = signal.candleHigh - signal.candleLow;
+  const slBuffer = candleRange * 0.5;
+  const sl = isBuy ? (signal.candleLow - slBuffer) : (signal.candleHigh + slBuffer);
+  // Price TP: 2:1 risk-reward
+  const risk = isBuy ? (entry - sl) : (sl - entry);
+  const tpPrice = isBuy ? (entry + risk * 2) : (entry - risk * 2);
+
   const equity = fl2(balance + positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0));
   const margin = fl2(equity * CAPITAL_PCT);
   if (equity - lockedMargin < margin) return;
@@ -226,7 +237,7 @@ function processSignal(symbol, signal, tf, price) {
   totalFees = fl4(totalFees + entryFee);
   balance = fl2(balance - entryFee);
 
-  // TP: 2 candle durations from signal candle end
+  // Time-based TP fallback: max 2 candle durations from signal end
   const ms = candleMs(tf.granularity);
   const signalEndMs = signal.signalTime + ms;
   const tpTime = signalEndMs + ms * 2;
@@ -237,7 +248,7 @@ function processSignal(symbol, signal, tf, price) {
   const pos = {
     id: Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
     symbol, side: isBuy ? 'open_long' : 'open_short', direction: signal.direction,
-    entryPrice: entry, slPrice: sl, tpPrice: null,
+    entryPrice: entry, slPrice: sl, tpPrice: tpPrice,
     signalCandleLow: signal.candleLow, signalCandleHigh: signal.candleHigh,
     signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
     size, margin, contracts, timeframe: tf.name,
@@ -303,7 +314,17 @@ async function backfillHistory() {
         if (!entry) continue;
 
         const isBuy = signal.direction === 'BUY';
-        const sl = isBuy ? signal.candleLow : signal.candleHigh;
+        // Skip low-signal candles
+        const candleRangePct = (signal.candleHigh - signal.candleLow) / (signal.candleLow || 1);
+        if (candleRangePct < 0.005) continue;
+
+        // Wider SL: 1.5x candle range from entry
+        const candleRange = signal.candleHigh - signal.candleLow;
+        const slBuffer = candleRange * 0.5;
+        const sl = isBuy ? (signal.candleLow - slBuffer) : (signal.candleHigh + slBuffer);
+        // Price TP: 2:1 risk-reward
+        const risk = Math.abs(sl - entry);
+        const tpPrice = isBuy ? (entry + risk * 2) : (entry - risk * 2);
         if (isBuy && entry <= sl) continue;
         if (!isBuy && entry >= sl) continue;
 
@@ -316,6 +337,10 @@ async function backfillHistory() {
         for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
           const cLow = parseFloat(candles[j][3]);
           const cHigh = parseFloat(candles[j][2]);
+          // Check price TP first
+          if (isBuy && cHigh >= tpPrice) { exitPrice = tpPrice; exitReason = 'TP'; break; }
+          if (!isBuy && cLow <= tpPrice) { exitPrice = tpPrice; exitReason = 'TP'; break; }
+          // Check SL
           if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
           if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
         }
@@ -389,6 +414,17 @@ async function updatePositions() {
       reason = 'SL'; closed = true;
     }
 
+    // Price-based TP first (2:1 risk-reward)
+    if (!closed && pos.tpPrice) {
+      if (isLong && price >= pos.tpPrice) {
+        pnl = fl2(((pos.tpPrice - pos.entryPrice) / pos.entryPrice) * pos.size);
+        reason = 'TP'; closed = true;
+      } else if (!isLong && price <= pos.tpPrice) {
+        pnl = fl2(((pos.entryPrice - pos.tpPrice) / pos.entryPrice) * pos.size);
+        reason = 'TP'; closed = true;
+      }
+    }
+    // Time-based TP fallback (max 2 candles)
     if (!closed && Date.now() >= pos.tpTime) {
       const exitPnl = (diff / pos.entryPrice) * pos.size;
       pnl = fl2(exitPnl); reason = 'TP_TIME'; closed = true;
@@ -678,7 +714,17 @@ async function runBacktest(opts = {}) {
         const entry = parseFloat(entryCandle[1]);
         if (!entry) continue;
 
-        const sl = isBuy ? signal.candleLow : signal.candleHigh;
+        // Skip low-signal candles
+        const candleRangePct = (signal.candleHigh - signal.candleLow) / (signal.candleLow || 1);
+        if (candleRangePct < 0.005) continue;
+
+        // Wider SL: 1.5x candle range from entry
+        const candleRange = signal.candleHigh - signal.candleLow;
+        const slBuffer = candleRange * 0.5;
+        const sl = isBuy ? (signal.candleLow - slBuffer) : (signal.candleHigh + slBuffer);
+        // Price TP: 2:1 risk-reward
+        const risk = Math.abs(sl - entry);
+        const tpPrice = isBuy ? (entry + risk * 2) : (entry - risk * 2);
         const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
         if (btBalance < margin) continue;
         const size = fl2(margin * LEVERAGE);
@@ -690,6 +736,10 @@ async function runBacktest(opts = {}) {
         for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
           const cLow = parseFloat(candles[j][3]);
           const cHigh = parseFloat(candles[j][2]);
+          // Check price TP first
+          if (isBuy && cHigh >= tpPrice) { exitPrice = tpPrice; exitReason = 'TP'; break; }
+          if (!isBuy && cLow <= tpPrice) { exitPrice = tpPrice; exitReason = 'TP'; break; }
+          // Check SL
           if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
           if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
         }
