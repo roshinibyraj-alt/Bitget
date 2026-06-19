@@ -6,7 +6,7 @@ const path = require('path');
 // ── Config ──
 const API_BASE = 'https://api.bitget.com';
 const DEMO_BALANCE = 30000;
-const CAPITAL_PCT = 0.01;
+const CAPITAL_PCT = 0.005;
 const LEVERAGE = 20;
 const TAKER_FEE = 0.0006;
 
@@ -217,13 +217,11 @@ function processSignal(symbol, signal, tf, price) {
   const candleRangePct = (signal.candleHigh - signal.candleLow) / (signal.candleLow || 1);
   if (candleRangePct < 0.005) return;
 
-  // Wider SL: 1.5x candle range from entry
-  const candleRange = signal.candleHigh - signal.candleLow;
-  const slBuffer = candleRange * 0.5;
-  const sl = isBuy ? (signal.candleLow - slBuffer) : (signal.candleHigh + slBuffer);
-  // Price TP: 2:1 risk-reward
-  const risk = isBuy ? (entry - sl) : (sl - entry);
-  const tpPrice = isBuy ? (entry + risk * 2) : (entry - risk * 2);
+  // Fixed 2% SL distance from entry (predictable risk)
+  const riskPct = 0.02;
+  const sl = isBuy ? entry * (1 - riskPct) : entry * (1 + riskPct);
+  // TP: 2:1 risk-reward (4% from entry)
+  const tpPrice = isBuy ? entry * (1 + riskPct * 2) : entry * (1 - riskPct * 2);
 
   const equity = fl2(balance + positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0));
   const margin = fl2(equity * CAPITAL_PCT);
@@ -318,13 +316,11 @@ async function backfillHistory() {
         const candleRangePct = (signal.candleHigh - signal.candleLow) / (signal.candleLow || 1);
         if (candleRangePct < 0.005) continue;
 
-        // Wider SL: 1.5x candle range from entry
-        const candleRange = signal.candleHigh - signal.candleLow;
-        const slBuffer = candleRange * 0.5;
-        const sl = isBuy ? (signal.candleLow - slBuffer) : (signal.candleHigh + slBuffer);
-        // Price TP: 2:1 risk-reward
-        const risk = Math.abs(sl - entry);
-        const tpPrice = isBuy ? (entry + risk * 2) : (entry - risk * 2);
+        // Fixed 2% SL distance from entry
+        const riskPct = 0.02;
+        const sl = isBuy ? entry * (1 - riskPct) : entry * (1 + riskPct);
+        // TP: 2:1 risk-reward (4% from entry)
+        const tpPrice = isBuy ? entry * (1 + riskPct * 2) : entry * (1 - riskPct * 2);
         if (isBuy && entry <= sl) continue;
         if (!isBuy && entry >= sl) continue;
 
@@ -718,13 +714,11 @@ async function runBacktest(opts = {}) {
         const candleRangePct = (signal.candleHigh - signal.candleLow) / (signal.candleLow || 1);
         if (candleRangePct < 0.005) continue;
 
-        // Wider SL: 1.5x candle range from entry
-        const candleRange = signal.candleHigh - signal.candleLow;
-        const slBuffer = candleRange * 0.5;
-        const sl = isBuy ? (signal.candleLow - slBuffer) : (signal.candleHigh + slBuffer);
-        // Price TP: 2:1 risk-reward
-        const risk = Math.abs(sl - entry);
-        const tpPrice = isBuy ? (entry + risk * 2) : (entry - risk * 2);
+        // Fixed 2% SL distance from entry
+        const riskPct = 0.02;
+        const sl = isBuy ? entry * (1 - riskPct) : entry * (1 + riskPct);
+        // TP: 2:1 risk-reward (4% from entry)
+        const tpPrice = isBuy ? entry * (1 + riskPct * 2) : entry * (1 - riskPct * 2);
         const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
         if (btBalance < margin) continue;
         const size = fl2(margin * LEVERAGE);
