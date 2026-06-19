@@ -214,10 +214,9 @@ function processSignal(symbol, signal, tf, price) {
   const isBuy = signal.direction === 'BUY';
   const entry = price;
   const sl = isBuy ? signal.candleLow : signal.candleHigh;
-  const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
-
-  const currentOpenUpl = positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0);
-  if (balance + currentOpenUpl - lockedMargin < margin) return;
+  const equity = fl2(balance + positions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0));
+  const margin = fl2(equity * CAPITAL_PCT);
+  if (equity - lockedMargin < margin) return;
 
   const size = fl2(margin * LEVERAGE);
   const contracts = fl2(size / entry);
@@ -281,7 +280,7 @@ async function backfillHistory() {
   // Process each timeframe sequentially, pairs concurrently in batches
   for (const tf of TIMEFRAMES) {
     logFn('⏳ Backfilling ' + tf.name + '...');
-    const limit = 60;
+    const limit = 120;
     const batchSize = 10;
     for (let batchStart = 0; batchStart < activeSymbols.length; batchStart += batchSize) {
       const batch = activeSymbols.slice(batchStart, batchStart + batchSize);

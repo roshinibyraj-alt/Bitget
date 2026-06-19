@@ -117,7 +117,7 @@ function render(d){
   var dot=document.getElementById('hd-dot');
   if(d.positions&&d.positions.length>0){dot.className='dot on'}else{dot.className='dot idle'}
   
-  document.getElementById('hd-mode').innerHTML='<span class="mode-tag mode-demo">DEMO '+d.pairs.length+'p</span>';
+  document.getElementById('hd-mode').innerHTML='<span class="mode-tag mode-demo">DEMO 4H • Compound</span> <span style="font-size:8px;color:var(--muted)">'+d.pairs.length+'p</span>';
   document.getElementById('hd-bal').textContent='$'+fmt(d.balance);
   document.getElementById('hd-avl').textContent='$'+fmt(d.available||d.balance);
   document.getElementById('hd-lck').textContent='$'+fmt(d.locked||0);
