@@ -492,6 +492,13 @@ function loadState() {
         positions = (d.positions || []).filter(p => p.status === 'open');
         signalLog = d.signalLog || [];
         processedCandles = d.processedCandles || {};
+        // Sanity check: balance should = DEMO_BALANCE + totalRealizedPnl - open_entry_fees
+        const openEntryFees = positions.reduce((s, p) => s + (p.entryFee || 0), 0);
+        const expectedBal = DEMO_BALANCE + totalRealizedPnl - openEntryFees;
+        if (Math.abs(balance - expectedBal) > 100 && Math.abs(balance - DEMO_BALANCE) > 100) {
+          console.log('⚠️ Balance corruption detected: $' + balance + ' vs expected $' + expectedBal + '. Resetting...');
+          balance = expectedBal;
+        }
       } else { balance = DEMO_BALANCE; }
     }
   } catch (_) {}
@@ -569,8 +576,8 @@ async function start(emit, logEmit) {
   // Initial emit so dashboard has data immediately
   emitFn('snapshot', buildSnapshot());
 
-  // Run backfill in background - don't block startup
-  backfillHistory().catch(e => logFn('⚠️ Backfill error: ' + e.message));
+  // Run backfill synchronously (before live trading) to avoid balance race conditions
+  await backfillHistory();
 
   // Schedule daily pair refresh at 15:50 UTC
   const msUntilRefresh = getMsUntilNextRefresh();
