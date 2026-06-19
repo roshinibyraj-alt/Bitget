@@ -28,18 +28,11 @@ app.get('/api/snapshot', (req, res) => {
 app.get('/api/backtest', async (req, res) => {
   try {
     const pairs = parseInt(req.query.pairs) || 5;
-    res.json({ status: 'running', message: 'Backtest started with ' + pairs + ' pairs per side' });
-    // Run backtest asynchronously
     const result = await bot.runBacktest({ topPairs: pairs });
-    // Store result for polling
-    global.backtestResult = result;
+    res.json(result);
   } catch(e) {
     res.json({ error: e.message });
   }
-});
-
-app.get('/api/backtest/result', (req, res) => {
-  res.json(global.backtestResult || { status: 'not_run' });
 });
 
 let lastEmit = 0;
