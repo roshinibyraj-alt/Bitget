@@ -51,17 +51,19 @@ function broadcast(snapshot) {
 }
 
 io.on('connection', (socket) => {
-  console.log(`🔌 Client ${socket.id}`);
+  console.log('🔌 Client ' + socket.id);
   try { socket.emit('snapshot', bot.buildSnapshot()); } catch (_) {}
-  socket.on('disconnect', () => console.log(`🔌 Left ${socket.id}`));
+  socket.on('disconnect', () => console.log('🔌 Left ' + socket.id));
 });
 
 async function main() {
-  await bot.start(
+  // Start HTTP server FIRST so dashboard loads immediately
+  server.listen(PORT, () => console.log('🌐 http://localhost:' + PORT));
+  // Start bot asynchronously - don't block server
+  bot.start(
     (event, data) => { if (event === 'snapshot') broadcast(data); },
     (msg) => console.log(msg)
   );
-  server.listen(PORT, () => console.log(`🌐 http://localhost:${PORT}`));
 }
 
 main();

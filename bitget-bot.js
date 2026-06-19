@@ -18,6 +18,16 @@ const TIMEFRAMES = [
   { name: '1D', granularity: '1D', scanMs: 86400000 },
 ];
 
+// ── Daily Refresh Schedule (15:50 UTC) ──
+function getMsUntilNextRefresh() {
+  const now = Date.now();
+  const d = new Date(now);
+  d.setUTCHours(15, 50, 0, 0);
+  let target = d.getTime();
+  if (target <= now) target += 86400000;
+  return target - now;
+}
+
 // ── State ──
 let balance = DEMO_BALANCE;
 let lockedMargin = 0;
@@ -80,7 +90,8 @@ let activeSymbols = [];
 
 async function refreshPairs() {
   const isFirstRun = lastPairRefresh === 0;
-  if (!isFirstRun && activeSymbols.length > 0) return; // refresh once at start
+  // Don't refresh more than once per minute (avoids spamming API)
+  if (!isFirstRun && Date.now() - lastPairRefresh < 60000) return;
 
   const contracts = await fetchContracts();
   if (!Array.isArray(contracts)) return;
@@ -235,68 +246,86 @@ async function backfillHistory() {
   logFn(`📚 Backfilling 10 days of 1D reversal signals for ${activeSymbols.length} pairs...`);
   let histTrades = 0;
 
-  for (const symbol of activeSymbols) {
-    const candles = await getCandles(symbol, '1D', 15);
-    if (!Array.isArray(candles) || candles.length < 7) continue;
-    // candles[0] oldest, candles[last] newest (possibly forming)
+  // Process pairs concurrently in batches of 10
+  const batchSize = 10;
+  for (let batchStart = 0; batchStart < activeSymbols.length; batchStart += batchSize) {
+    const batch = activeSymbols.slice(batchStart, batchStart + batchSize);
+    const batchResults = await Promise.all(batch.map(async (symbol) => {
+      let localTrades = 0;
+      const candles = await getCandles(symbol, '1D', 15);
+      if (!Array.isArray(candles) || candles.length < 7) return 0;
+      
+      for (let i = 4; i < candles.length - 1; i++) {
+        const slice = candles.slice(0, i + 1);
+        const signal = checkCandleSignal(slice);
+        if (!signal) continue;
 
-    for (let i = 4; i < candles.length - 1; i++) {
-      const slice = candles.slice(0, i + 1);
-      const signal = checkCandleSignal(slice);
-      if (!signal) continue;
+        const key = symbol + ':1D:' + signal.signalTime;
+        if (processedCandles[key]) continue;
+        processedCandles[key] = true;
 
-      const key = `${symbol}:1D:${signal.signalTime}`;
-      if (processedCandles[key]) continue;
-      processedCandles[key] = true;
+        const entryCandle = candles[i];
+        const entry = parseFloat(entryCandle[1]);
+        if (!entry) continue;
 
-      const entryCandle = candles[i];
-      const entry = parseFloat(entryCandle[1]);
-      if (!entry) continue;
+        const isBuy = signal.direction === 'BUY';
+        const sl = isBuy ? signal.candleLow : signal.candleHigh;
+        if (isBuy && entry <= sl) continue;
+        if (!isBuy && entry >= sl) continue;
 
-      const isBuy = signal.direction === 'BUY';
-      const sl = isBuy ? signal.candleLow : signal.candleHigh;
-      if (isBuy && entry <= sl) continue;
-      if (!isBuy && entry >= sl) continue;
+        const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
+        const size = fl2(margin * LEVERAGE);
+        const entryFee = fl2(size * TAKER_FEE);
 
-      const margin = fl2(DEMO_BALANCE * CAPITAL_PCT);
-      const size = fl2(margin * LEVERAGE);
-      const entryFee = fl2(size * TAKER_FEE);
+        const exitIdx = Math.min(i + 2, candles.length - 1);
+        let exitPrice = null, exitReason = 'TP_TIME';
+        for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
+          const cLow = parseFloat(candles[j][3]);
+          const cHigh = parseFloat(candles[j][2]);
+          if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+          if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+        }
+        if (!exitPrice) exitPrice = parseFloat(candles[exitIdx][4]);
 
-      // Find exit: scan next 2 candles for SL hit, else close at exit candle
-      const exitIdx = Math.min(i + 2, candles.length - 1);
-      let exitPrice = null, exitReason = 'TP_TIME';
-      for (let j = i + 1; j <= exitIdx && j < candles.length; j++) {
-        const cLow = parseFloat(candles[j][3]);
-        const cHigh = parseFloat(candles[j][2]);
-        if (isBuy && cLow <= sl) { exitPrice = sl; exitReason = 'SL'; break; }
-        if (!isBuy && cHigh >= sl) { exitPrice = sl; exitReason = 'SL'; break; }
+        const diff = isBuy ? (exitPrice - entry) : (entry - exitPrice);
+        const tradingPnl = (diff / entry) * size;
+        const exitFee = fl2(size * TAKER_FEE);
+        const netPnl = fl2(tradingPnl - exitFee - entryFee);
+
+        totalFees = fl4(totalFees + entryFee + exitFee);
+        totalRealizedPnl = fl4(totalRealizedPnl + netPnl);
+        if (netPnl >= 0) wins++; else losses++;
+
+        trades.push({
+          symbol: symbol, direction: signal.direction,
+          entryPrice: entry, slPrice: sl, exitPrice: exitPrice, pnl: netPnl,
+          margin: margin, size: size, entryFee: entryFee, timeframe: '1D',
+          exitReason: exitReason,
+          signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
+          consecutive: signal.consecutiveCount,
+          time: parseInt(entryCandle[0]),
+          closeTime: parseInt(candles[exitIdx][0]) + 86400000,
+        });
+        localTrades++;
       }
-      if (!exitPrice) exitPrice = parseFloat(candles[exitIdx][4]);
-
-      const diff = isBuy ? (exitPrice - entry) : (entry - exitPrice);
-      const tradingPnl = (diff / entry) * size;
-      const exitFee = fl2(size * TAKER_FEE);
-      const netPnl = fl2(tradingPnl - exitFee - entryFee);
-
-      totalFees = fl4(totalFees + entryFee + exitFee);
-      balance = fl2(balance + tradingPnl - exitFee - entryFee);
-      totalRealizedPnl = fl4(totalRealizedPnl + netPnl);
-      if (netPnl >= 0) wins++; else losses++;
-
-      trades.push({
-        symbol, direction: signal.direction, side: isBuy ? 'open_long' : 'open_short',
-        entryPrice: entry, slPrice: sl, exitPrice, pnl: netPnl, margin, size,
-        entryFee, timeframe: '1D', exitReason,
-        signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
-        consecutive: signal.consecutiveCount,
-        time: parseInt(entryCandle[0]), closeTime: parseInt(candles[exitIdx][0]) + 86400000,
-      });
-      histTrades++;
+      return localTrades;
+    }));
+    
+    // Sum up trades from this batch
+    for (const t of batchResults) {
+      if (typeof t === 'number') histTrades += t;
+    }
+    
+    // Periodically save state and emit updates during long backfill
+    if (histTrades > 0) {
+      saveState();
+      try { emitFn('snapshot', buildSnapshot()); } catch(_) {}
     }
   }
 
   if (trades.length > 500) trades = trades.slice(-500);
-  logFn(`📚 Backfill: ${histTrades} historical trades | Bal: $${fl2(balance)}`);
+  balance = fl2(balance);
+  logFn('📚 Backfill: ' + histTrades + ' historical trades | Bal: $' + fl2(balance));
   saveState();
 }
 
@@ -509,15 +538,22 @@ async function start(emit, logEmit) {
   logFn(`✅ Reversal Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 1D only`);
   logFn(`📊 3+ consecutive → reversal | SL: candle low/high | TP: 2 days after entry`);
 
-  // Initial pair fetch and backfill
+  // Initial pair fetch (synchronous)
   await refreshPairs();
-  await backfillHistory();
+  // Initial emit so dashboard has data immediately
+  emitFn('snapshot', buildSnapshot());
+
+  // Run backfill in background - don't block startup
+  backfillHistory().catch(e => logFn('⚠️ Backfill error: ' + e.message));
 
   // Schedule daily pair refresh at 15:50 UTC
+  const msUntilRefresh = getMsUntilNextRefresh();
+  logFn('📅 Next pair refresh in ' + Math.round(msUntilRefresh / 60000) + ' min');
   setTimeout(async function refreshLoop() {
     await refreshPairs();
+    emitFn('snapshot', buildSnapshot());
     setTimeout(refreshLoop, getMsUntilNextRefresh());
-  }, getMsUntilNextRefresh());
+  }, msUntilRefresh);
 
   // Live trading loop
   setTimeout(tick, 5000);
