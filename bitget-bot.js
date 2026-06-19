@@ -319,6 +319,7 @@ async function backfillHistory() {
         const netPnl = fl2(tradingPnl - exitFee - entryFee);
 
         totalFees = fl4(totalFees + entryFee + exitFee);
+        balance = fl2(balance + tradingPnl - exitFee - entryFee);
         totalRealizedPnl = fl4(totalRealizedPnl + netPnl);
         if (netPnl >= 0) wins++; else losses++;
 
@@ -495,7 +496,7 @@ function loadState() {
         // Sanity check: balance should = DEMO_BALANCE + totalRealizedPnl - open_entry_fees
         const openEntryFees = positions.reduce((s, p) => s + (p.entryFee || 0), 0);
         const expectedBal = DEMO_BALANCE + totalRealizedPnl - openEntryFees;
-        if (Math.abs(balance - expectedBal) > 100 && Math.abs(balance - DEMO_BALANCE) > 100) {
+        if (Math.abs(balance - expectedBal) > 100) {
           console.log('⚠️ Balance corruption detected: $' + balance + ' vs expected $' + expectedBal + '. Resetting...');
           balance = expectedBal;
         }
