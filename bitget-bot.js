@@ -9,10 +9,10 @@ const DEMO_BALANCE = 30000;
 const CAPITAL_PCT = 0.01;
 const LEVERAGE = 20;
 const TAKER_FEE = 0.0006;
-const TOP_PAIRS = 20;
+
 const STATE_FILE = path.join(__dirname, 'state.json');
-const STATE_VERSION = 7;
-const MIN_VOLUME = 100000;
+const STATE_VERSION = 8;
+const MIN_VOLUME = 5000000; // $5M minimum
 
 const TIMEFRAMES = [
   { name: '1D', granularity: '1D', scanMs: 86400000 },
@@ -74,82 +74,79 @@ async function getTicker(symbol) {
 let lastPairRefresh = 0;
 let activeSymbols = [];
 
-function getMsUntilNextRefresh() {
-  const now = new Date();
-  const utc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 15, 50, 0, 0));
-  if (now >= utc) utc.setUTCDate(utc.getUTCDate() + 1);
-  return utc - now;
-}
-
-async function refreshTopPairs() {
-  // Only refresh at 15:50 UTC daily (or forced on first run)
-  const now = new Date();
-  const utcH = now.getUTCHours(), utcM = now.getUTCMinutes();
-  const isRefreshTime = utcH === 23 && utcM >= 48 && utcM <= 55;
+async function refreshPairs() {
   const isFirstRun = lastPairRefresh === 0;
-
-  if (!isFirstRun && !isRefreshTime && activeSymbols.length > 0) return;
-  if (isFirstRun && activeSymbols.length > 0 && !isRefreshTime) return; // already have pairs
+  if (!isFirstRun && activeSymbols.length > 0) return; // refresh once at start
 
   const tickers = await getAllTickers();
   if (!Array.isArray(tickers)) return;
-  const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
-  const withChange = usdt.map(t => {
-    const last = parseFloat(t.lastPr || 0);
-    const open = parseFloat(t.open24h || 0);
-    const chg = open > 0 ? ((last - open) / open) * 100 : 0;
-    return { symbol: t.symbol, change: chg, price: last };
-  }).filter(t => t.price > 0);
-  withChange.sort((a, b) => b.change - a.change);
-  const gainers = withChange.slice(0, TOP_PAIRS);
-  const losers = withChange.slice(-TOP_PAIRS).reverse();
-  activeSymbols = [...new Set([...gainers.map(t => t.symbol), ...losers.map(t => t.symbol)])];
+  const volumeFiltered = tickers.filter(t =>
+    t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME
+  );
+  activeSymbols = volumeFiltered.map(t => t.symbol);
   lastPairRefresh = Date.now();
 
   // Keep pairs with open positions
   const posSymbols = new Set(positions.filter(p => p.status === 'open').map(p => p.symbol));
-  monitoredPairs = monitoredPairs.filter(p => activeSymbols.includes(p.symbol) || posSymbols.has(p.symbol));
-
   const activeSet = new Set(activeSymbols);
+
+  // Add new pairs
+  for (const s of activeSymbols) {
+    if (!monitoredPairs.find(m => m.symbol === s)) {
+      monitoredPairs.push({ symbol: s, price: 0, change: 0, lastSignal: null, lastCandle: {} });
+    }
+  }
+  // Remove pairs no longer in active set (unless they have open positions)
+  monitoredPairs = monitoredPairs.filter(p => activeSet.has(p.symbol) || posSymbols.has(p.symbol));
+
+  // Keep processedCandles for active pairs
   for (const key of Object.keys(processedCandles)) {
     const sym = key.split(':')[0];
     if (!activeSet.has(sym) && !posSymbols.has(sym)) delete processedCandles[key];
   }
 
-  const pairMap = {};
-  withChange.forEach(t => { pairMap[t.symbol] = { price: t.price, change: t.change }; });
-  for (const s of activeSymbols) {
-    const existing = monitoredPairs.find(m => m.symbol === s);
-    const td = pairMap[s] || {};
-    if (existing) {
-      existing.price = td.price || existing.price;
-      existing.change = td.change;
-    } else {
-      monitoredPairs.push({ symbol: s, price: td.price || 0, change: td.change || 0, lastSignal: null, lastCandle: {} });
-    }
-  }
-
-  logFn(`📋 ${activeSymbols.length} pairs (${gainers[0]?.symbol || '?'} +${fl2(gainers[0]?.change)}% / ${losers[0]?.symbol || '?'} ${fl2(losers[0]?.change)}%)`);
+  logFn(`📋 ${activeSymbols.length} pairs with ≥ $5M volume`);
 }
 
-// ── Candle Color Signal ──
+// ── Candle Color Signal: 3+ consecutive → reversal ──
 function checkCandleSignal(candles) {
-  if (!Array.isArray(candles) || candles.length < 3) return null;
-  const prev = candles[candles.length - 2];
-  if (!prev) return null;
-  const open = parseFloat(prev[1]);
-  const close = parseFloat(prev[4]);
-  const high = parseFloat(prev[2]);
-  const low = parseFloat(prev[3]);
-  const ts = prev[0];
-  if (!open || !close) return null;
-  const isGreen = close > open;
-  const isRed = close < open;
-  if (!isGreen && !isRed) return null;
+  if (!Array.isArray(candles) || candles.length < 4) return null;
+  // candles[0] oldest, candles[last-1] = signal candle (closed), candles[last] = forming
+  const signalCandle = candles[candles.length - 2]; // last closed candle
+  if (!signalCandle) return null;
+  const sigOpen = parseFloat(signalCandle[1]);
+  const sigClose = parseFloat(signalCandle[4]);
+  const sigHigh = parseFloat(signalCandle[2]);
+  const sigLow = parseFloat(signalCandle[3]);
+  const sigTs = signalCandle[0];
+  if (!sigOpen || !sigClose) return null;
+  const sigGreen = sigClose > sigOpen;
+  const sigRed = sigClose < sigOpen;
+  if (!sigGreen && !sigRed) return null;
+
+  // Count consecutive candles BEFORE signalCandle that are opposite color
+  const needColor = sigGreen ? 'RED' : 'GREEN'; // we need 3+ consecutive BEFORE in the opposite direction
+  let consecutive = 0;
+  for (let i = candles.length - 3; i >= 0; i--) {
+    const c = candles[i];
+    const co = parseFloat(c[1]);
+    const cc = parseFloat(c[4]);
+    if (!co || !cc) break;
+    if (needColor === 'GREEN' && cc > co) { consecutive++; }
+    else if (needColor === 'RED' && cc < co) { consecutive++; }
+    else break;
+  }
+
+  if (consecutive < 3) return null; // need 3+ consecutive in opposite direction
+
+  // signal is a reversal: after 3+ GREEN consecutive, now RED → SHORT
+  // After 3+ RED consecutive, now GREEN → LONG
+  const direction = sigRed ? 'SELL' : 'BUY';
   return {
-    direction: isGreen ? 'BUY' : 'SELL',
-    signalTime: parseInt(ts),
-    candleOpen: open, candleClose: close, candleHigh: high, candleLow: low, isGreen,
+    direction: direction,
+    signalTime: parseInt(sigTs),
+    candleOpen: sigOpen, candleClose: sigClose, candleHigh: sigHigh, candleLow: sigLow,
+    isGreen: sigGreen, consecutiveCount: consecutive,
   };
 }
 
@@ -210,7 +207,7 @@ function processSignal(symbol, signal, tf, price) {
   });
   if (signalLog.length > 200) signalLog = signalLog.slice(-200);
 
-  logFn(`📊 ${signal.direction} ${symbol} (${tf.name}) | Entry: $${entry} | SL: $${sl} | Candle: O$${signal.candleOpen} C$${signal.candleClose}`);
+  logFn(`📊 ${signal.direction} ${symbol} (${tf.name}) | ${signal.consecutiveCount} consecutive → reversal | Entry: $${entry} | SL: $${sl}`);
   saveState();
   emitFn('snapshot', buildSnapshot());
 }
@@ -223,16 +220,15 @@ async function backfillHistory() {
   backfillDone = true;
   if (activeSymbols.length === 0) return;
 
-  logFn(`📚 Backfilling 1 day of 1D signals for ${activeSymbols.length} pairs...`);
+  logFn(`📚 Backfilling 10 days of 1D reversal signals for ${activeSymbols.length} pairs...`);
   let histTrades = 0;
 
   for (const symbol of activeSymbols) {
-    const candles = await getCandles(symbol, '1D', 5);
-    if (!Array.isArray(candles) || candles.length < 5) continue;
-
+    const candles = await getCandles(symbol, '1D', 15);
+    if (!Array.isArray(candles) || candles.length < 7) continue;
     // candles[0] oldest, candles[last] newest (possibly forming)
-    // i = entry candle index, signal is candle i-1
-    for (let i = 3; i < candles.length - 1; i++) {
+
+    for (let i = 4; i < candles.length - 1; i++) {
       const slice = candles.slice(0, i + 1);
       const signal = checkCandleSignal(slice);
       if (!signal) continue;
@@ -280,6 +276,7 @@ async function backfillHistory() {
         entryPrice: entry, slPrice: sl, exitPrice, pnl: netPnl, margin, size,
         entryFee, timeframe: '1D', exitReason,
         signalCandleOpen: signal.candleOpen, signalCandleClose: signal.candleClose,
+        consecutive: signal.consecutiveCount,
         time: parseInt(entryCandle[0]), closeTime: parseInt(candles[exitIdx][0]) + 86400000,
       });
       histTrades++;
@@ -349,7 +346,7 @@ async function updatePositions() {
 let lastScan = {};
 
 async function scan() {
-  await refreshTopPairs();
+  await refreshPairs();
   if (activeSymbols.length === 0) return;
 
   const now = Date.now();
@@ -363,8 +360,8 @@ async function scan() {
     for (let i = 0; i < symbols.length; i += 5) {
       const chunk = symbols.slice(i, i + 5);
       const chunkResults = await Promise.all(chunk.map(async (symbol) => {
-        const candles = await getCandles(symbol, tf.granularity, 10);
-        if (!Array.isArray(candles) || candles.length < 3) return null;
+        const candles = await getCandles(symbol, tf.granularity, 15);
+        if (!Array.isArray(candles) || candles.length < 5) return null;
 
         const prev = candles[candles.length - 2];
         const prevEndTs = parseInt(prev[0]);
@@ -375,6 +372,7 @@ async function scan() {
         if (now - candleEndTime > CANDLE_MS * 1.5) return null; // too old for live
 
         const signal = checkCandleSignal(candles);
+        if (!signal) return null;
 
         const pair = monitoredPairs.find(m => m.symbol === symbol);
         if (pair && candles.length >= 2) {
@@ -386,7 +384,6 @@ async function scan() {
             close: parseFloat(prev[4]) || 0,
           };
         }
-        if (!signal) return null;
         return { symbol, signal, tf, pair };
       }));
       results.push(...chunkResults);
@@ -497,16 +494,16 @@ async function tick() {
 async function start(emit, logEmit) {
   emitFn = emit; logFn = logEmit; startTime = Date.now();
   loadState();
-  logFn(`✅ Candle Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 1D only`);
-  logFn(`📊 Signal: prev candle color | Entry: next open | SL: candle low/high | TP: 2 days`);
+  logFn(`✅ Reversal Bot v${STATE_VERSION} | DEMO $${fl2(balance)} | 1D only`);
+  logFn(`📊 3+ consecutive → reversal | SL: candle low/high | TP: 2 days after entry`);
 
   // Initial pair fetch and backfill
-  await refreshTopPairs();
+  await refreshPairs();
   await backfillHistory();
 
   // Schedule daily pair refresh at 15:50 UTC
   setTimeout(async function refreshLoop() {
-    await refreshTopPairs();
+    await refreshPairs();
     setTimeout(refreshLoop, getMsUntilNextRefresh());
   }, getMsUntilNextRefresh());
 
@@ -545,16 +542,7 @@ async function runBacktest(opts = {}) {
   const tickers = await getAllTickers();
   if (!Array.isArray(tickers)) return { error: 'Failed to fetch tickers' };
   const usdt = tickers.filter(t => t.symbol.endsWith('USDT') && parseFloat(t.usdtVolume || 0) >= MIN_VOLUME);
-  const withChange = usdt.map(t => {
-    const last = parseFloat(t.lastPr || 0);
-    const open = parseFloat(t.open24h || 0);
-    return { symbol: t.symbol, change: open > 0 ? ((last - open) / open) * 100 : 0, price: last };
-  }).filter(t => t.price > 0);
-  withChange.sort((a, b) => b.change - a.change);
-  const symbols = [
-    ...withChange.slice(0, topPairs).map(t => t.symbol),
-    ...withChange.slice(-topPairs).reverse().map(t => t.symbol)
-  ];
+  const symbols = usdt.map(t => t.symbol).slice(0, topPairs);
 
   for (const symbol of [...new Set(symbols)]) {
     for (const tf of TIMEFRAMES) {
@@ -562,10 +550,10 @@ async function runBacktest(opts = {}) {
       if (!results.timeframe[tfKey]) results.timeframe[tfKey] = { trades: 0, wins: 0, losses: 0, pnl: 0, fees: 0 };
 
       const candles = await fetchAllCandles(symbol, tf.granularity);
-      if (candles.length < 3) continue;
+      if (candles.length < 5) continue;
 
       let btBalance = DEMO_BALANCE;
-      for (let i = 2; i < candles.length; i++) {
+      for (let i = 4; i < candles.length; i++) {
         const slice = candles.slice(0, i + 1);
         const signal = checkCandleSignal(slice);
         if (!signal) continue;
