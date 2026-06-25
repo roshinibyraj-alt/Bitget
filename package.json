@@ -1,8 +1,8 @@
 {
-  "name": "bitget-macd-bot",
-  "version": "1.0.0",
+  "name": "bitget-signal-bot",
+  "version": "2.0.0",
   "private": true,
-  "description": "Bitget MACD Golden/Death Cross Bot — 1D & 4H",
+  "description": "Bitget Signal Trading Bot — Telegram signals → Bitget USDT-M futures",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
