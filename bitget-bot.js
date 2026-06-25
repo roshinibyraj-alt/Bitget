@@ -110,10 +110,9 @@ async function setLeverage(symbol) {
 }
 
 async function placeBitgetOrder(symbol, side, size, orderType = 'market', price = '0') {
-  if (!HAS_BITGET_CREDS) {
-    logFn('⚠️ No Bitget API keys — sim mode only');
-    return { simulated: true, size, side, symbol };
-  }
+  // Always simulate — internal demo balance only
+  logFn('📋 Simulated ' + side + ' ' + size + ' ' + symbol + ' @ ' + (orderType === 'market' ? 'market' : '$' + price));
+  return { simulated: true, size, side, symbol, orderType, price };
   const body = {
     symbol, productType: 'USDT-FUTURES', marginMode: 'isolated', marginCoin: 'USDT',
     side: side.toLowerCase(), orderType, size: String(size), 
@@ -453,8 +452,8 @@ function buildSnapshot() {
     signals: signalLog.slice(-40).reverse(),
     sources: sourceSummary,
     telegram: !!TELEGRAM_TOKEN,
-    bitget: HAS_BITGET_CREDS,
-    demo: !HAS_BITGET_CREDS,
+    bitget: false,
+    demo: true,
     strategy: 'Telegram Signals',
     uptime: Math.floor((Date.now() - startTime) / 1000),
     activePositions: positions.filter(p => p.status === 'open').length,
@@ -469,7 +468,7 @@ async function start(emit, logEmit) {
   emitFn = emit; logFn = logEmit; startTime = Date.now();
   loadState();
 
-  logFn(`✅ Signal Bot v${STATE_VERSION} | ${HAS_BITGET_CREDS ? 'LIVE' : 'DEMO'} | ${CAPITAL_PCT*100}% × ${LEVERAGE}x`);
+  logFn(`✅ Signal Bot v${STATE_VERSION} | DEMO | ${CAPITAL_PCT*100}% × ${LEVERAGE}x`);
 
   if (!TELEGRAM_TOKEN) {
     logFn('⚠️  TELEGRAM_BOT_TOKEN not set — use dashboard to enter signals manually');
